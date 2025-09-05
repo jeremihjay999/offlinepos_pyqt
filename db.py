@@ -7,7 +7,6 @@ from typing import List, Dict, Optional, Tuple
 class POSDatabase:
     def __init__(self, db_path: str = "pos_system.db"):
         self.db_path = db_path
-        self.init_database()
     
     def get_connection(self):
         """Get database connection with foreign key support"""
@@ -40,6 +39,26 @@ class POSDatabase:
                 )
             ''')
             
+            # Categories table
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS categories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Brands table
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS brands (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
             # Suppliers table
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS suppliers (
@@ -57,11 +76,13 @@ class POSDatabase:
                 CREATE TABLE IF NOT EXISTS products (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL,
-                    brand TEXT,
-                    category TEXT,
+                    brand_id INTEGER,
+                    category_id INTEGER,
                     barcode TEXT UNIQUE,
                     supplier_id INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (brand_id) REFERENCES brands (id),
+                    FOREIGN KEY (category_id) REFERENCES categories (id),
                     FOREIGN KEY (supplier_id) REFERENCES suppliers (id)
                 )
             ''')
@@ -74,7 +95,7 @@ class POSDatabase:
                     name TEXT NOT NULL,  -- e.g., "1kg", "500g"
                     price DECIMAL(10,2) NOT NULL,
                     barcode TEXT UNIQUE,
-                    stock_qty INTEGER DEFAULT 0,
+                    stock_quantity INTEGER DEFAULT 0,
                     reorder_level INTEGER DEFAULT 10,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (product_id) REFERENCES products (id)
@@ -211,12 +232,62 @@ class POSDatabase:
             settings = conn.execute("SELECT key, value FROM settings").fetchall()
             return {s['key']: s['value'] for s in settings}
     
-    # Supplier Management
-    def create_supplier(self, name: str, phone: str = "", email: str = "", address: str = "") -> int:
-        """Create supplier and return ID"""
+    # Category Management
+    def add_category(self, name: str, description: str = None) -> int:
+        """Add a new category"""
         with self.get_connection() as conn:
-            cursor = conn.execute(
-                "INSERT INTO suppliers (name, phone, email, address) VALUES (?, ?, ?, ?)",
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR IGNORE INTO categories (name, description) VALUES (?, ?)",
+                (name, description)
+            )
+            if cursor.rowcount == 0:
+                # Category already exists, get its ID
+                cursor.execute("SELECT id FROM categories WHERE name = ?", (name,))
+                return cursor.fetchone()['id']
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_all_categories(self) -> List[Dict]:
+        """Get all categories"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM categories ORDER BY name")
+            return [dict(row) for row in cursor.fetchall()]
+    
+    # Brand Management
+    def add_brand(self, name: str, description: str = None) -> int:
+        """Add a new brand"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR IGNORE INTO brands (name, description) VALUES (?, ?)",
+                (name, description)
+            )
+            if cursor.rowcount == 0:
+                # Brand already exists, get its ID
+                cursor.execute("SELECT id FROM brands WHERE name = ?", (name,))
+                return cursor.fetchone()['id']
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_all_brands(self) -> List[Dict]:
+        """Get all brands"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM brands ORDER BY name")
+            return [dict(row) for row in cursor.fetchall()]
+    
+    # Supplier Management
+    def add_supplier(self, name: str, phone: str = None, 
+                    email: str = None, address: str = None) -> int:
+        """Add a new supplier"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """INSERT INTO suppliers 
+                   (name, phone, email, address) 
+                   VALUES (?, ?, ?, ?)""",
                 (name, phone, email, address)
             )
             conn.commit()
@@ -225,8 +296,9 @@ class POSDatabase:
     def get_all_suppliers(self) -> List[Dict]:
         """Get all suppliers"""
         with self.get_connection() as conn:
-            suppliers = conn.execute("SELECT * FROM suppliers ORDER BY name").fetchall()
-            return [dict(supplier) for supplier in suppliers]
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM suppliers ORDER BY name")
+            return [dict(row) for row in cursor.fetchall()]
     
     def get_supplier(self, supplier_id: int) -> Optional[Dict]:
         """Get supplier by ID"""
@@ -234,41 +306,105 @@ class POSDatabase:
             supplier = conn.execute("SELECT * FROM suppliers WHERE id = ?", (supplier_id,)).fetchone()
             return dict(supplier) if supplier else None
     
-    # Product Management
-    def create_product(self, name: str, brand: str = "", category: str = "", 
-                      barcode: str = "", supplier_id: int = None) -> int:
-        """Create product and return ID"""
+    def get_product_by_barcode(self, barcode: str) -> Optional[Dict]:
+        """Get product by barcode"""
         with self.get_connection() as conn:
-            cursor = conn.execute(
-                "INSERT INTO products (name, brand, category, barcode, supplier_id) VALUES (?, ?, ?, ?, ?)",
-                (name, brand, category, barcode or None, supplier_id)
-            )
-            conn.commit()
-            return cursor.lastrowid
+            product = conn.execute("SELECT * FROM products WHERE barcode = ?", (barcode,)).fetchone()
+            return dict(product) if product else None
     
-    def create_variant(self, product_id: int, name: str, price: float, 
-                      barcode: str = "", stock_qty: int = 0, reorder_level: int = 10) -> int:
-        """Create product variant and return ID"""
+    # Product Management
+    def add_product(self, name: str, category_id: int = None, 
+                   brand_id: int = None, supplier_id: int = None, barcode: str = None) -> int:
+        """
+        Add a new product to the database
+        
+        Args:
+            name: Product name
+            category_id: ID of the category
+            brand_id: ID of the brand
+            supplier_id: ID of the supplier
+            barcode: Product barcode (optional)
+            
+        Returns:
+            int: The ID of the newly created product
+        """
         with self.get_connection() as conn:
-            cursor = conn.execute(
-                "INSERT INTO variants (product_id, name, price, barcode, stock_qty, reorder_level) VALUES (?, ?, ?, ?, ?, ?)",
-                (product_id, name, price, barcode or None, stock_qty, reorder_level)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO products (name, category_id, brand_id, supplier_id, barcode)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (name, category_id, brand_id, supplier_id, barcode)
             )
+            product_id = cursor.lastrowid
             conn.commit()
-            return cursor.lastrowid
+            return product_id
+            
+    def add_product_variant(self, product_id: int, name: str, price: float, 
+                          stock_quantity: int = 0, reorder_level: int = 5) -> int:
+        """
+        Add a variant to a product
+        
+        Args:
+            product_id: ID of the product
+            name: Variant name (e.g., "500g", "Red")
+            price: Price of the variant
+            stock_quantity: Initial stock quantity
+            reorder_level: Reorder level for this variant (default: 5)
+            
+        Returns:
+            int: The ID of the newly created variant
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO variants (product_id, name, price, stock_quantity, reorder_level)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (product_id, name, price, stock_quantity, reorder_level)
+            )
+            variant_id = cursor.lastrowid
+            conn.commit()
+            return variant_id
+    
+    
     
     def get_products_with_variants(self) -> List[Dict]:
         """Get all products with their variants and supplier info"""
         with self.get_connection() as conn:
+            # Check if stock_quantity column exists
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(variants)")
+            columns = [col[1] for col in cursor.fetchall()]
+            
+            if 'stock_quantity' not in columns:
+                print("Adding stock_quantity column to variants table...")
+                try:
+                    # To add a column, we need to commit and then reconnect
+                    cursor.execute("ALTER TABLE variants ADD COLUMN stock_quantity INTEGER DEFAULT 0")
+                    conn.commit()
+                    print("Successfully added stock_quantity column to variants table.")
+                except sqlite3.Error as e:
+                    print(f"Error adding column: {e}")
+                    conn.rollback()
+
+        # Re-establish connection to make sure the new column is recognized
+        with self.get_connection() as conn:
             query = '''
                 SELECT 
-                    p.id as product_id, p.name as product_name, p.brand, p.category, p.barcode as product_barcode,
-                    v.id as variant_id, v.name as variant_name, v.price, v.barcode as variant_barcode, 
-                    v.stock_qty, v.reorder_level,
-                    s.name as supplier_name, s.phone as supplier_phone, s.email as supplier_email
+                    p.id as product_id, p.name as product_name, p.barcode as product_barcode,
+                    v.id as variant_id, v.name as variant_name, v.price as price, v.barcode as variant_barcode, 
+                    v.stock_quantity, v.reorder_level,
+                    s.name as supplier_name, s.phone as supplier_phone, s.email as supplier_email,
+                    b.name as brand_name,
+                    c.name as category_name
                 FROM products p
                 LEFT JOIN variants v ON p.id = v.product_id
                 LEFT JOIN suppliers s ON p.supplier_id = s.id
+                LEFT JOIN brands b ON p.brand_id = b.id
+                LEFT JOIN categories c ON p.category_id = c.id
                 ORDER BY p.name, v.name
             '''
             results = conn.execute(query).fetchall()
@@ -280,12 +416,16 @@ class POSDatabase:
         with self.get_connection() as conn:
             query = '''
                 SELECT 
-                    p.id as product_id, p.name as product_name, p.brand, p.category,
+                    p.id as product_id, p.name as product_name, 
                     v.id as variant_id, v.name as variant_name, v.price, v.barcode, 
-                    v.stock_qty, v.reorder_level
+                    v.stock_quantity, v.reorder_level,
+                    b.name as brand_name,
+                    c.name as category_name
                 FROM products p
                 LEFT JOIN variants v ON p.id = v.product_id
-                WHERE p.name LIKE ? OR p.brand LIKE ? OR p.barcode LIKE ? OR v.barcode LIKE ?
+                LEFT JOIN brands b ON p.brand_id = b.id
+                LEFT JOIN categories c ON p.category_id = c.id
+                WHERE p.name LIKE ? OR b.name LIKE ? OR p.barcode LIKE ? OR v.barcode LIKE ?
                 ORDER BY p.name, v.name
             '''
             results = conn.execute(query, (search_term, search_term, search_term, search_term)).fetchall()
@@ -297,10 +437,14 @@ class POSDatabase:
             # Check variant barcode first
             query = '''
                 SELECT 
-                    p.id as product_id, p.name as product_name, p.brand, p.category,
-                    v.id as variant_id, v.name as variant_name, v.price, v.stock_qty
+                    p.id as product_id, p.name as product_name, 
+                    v.id as variant_id, v.name as variant_name, v.price, v.stock_quantity,
+                    b.name as brand_name,
+                    c.name as category_name
                 FROM products p
                 JOIN variants v ON p.id = v.product_id
+                LEFT JOIN brands b ON p.brand_id = b.id
+                LEFT JOIN categories c ON p.category_id = c.id
                 WHERE v.barcode = ?
             '''
             result = conn.execute(query, (barcode,)).fetchone()
@@ -310,10 +454,14 @@ class POSDatabase:
             # Check product barcode
             query = '''
                 SELECT 
-                    p.id as product_id, p.name as product_name, p.brand, p.category,
-                    v.id as variant_id, v.name as variant_name, v.price, v.stock_qty
+                    p.id as product_id, p.name as product_name, 
+                    v.id as variant_id, v.name as variant_name, v.price, v.stock_quantity,
+                    b.name as brand_name,
+                    c.name as category_name
                 FROM products p
                 JOIN variants v ON p.id = v.product_id
+                LEFT JOIN brands b ON p.brand_id = b.id
+                LEFT JOIN categories c ON p.category_id = c.id
                 WHERE p.barcode = ?
             '''
             result = conn.execute(query, (barcode,)).fetchone()
@@ -323,7 +471,7 @@ class POSDatabase:
         """Update stock quantity for a variant"""
         with self.get_connection() as conn:
             conn.execute(
-                "UPDATE variants SET stock_qty = stock_qty + ? WHERE id = ?",
+                "UPDATE variants SET stock_quantity = stock_quantity + ? WHERE id = ?",
                 (quantity_change, variant_id)
             )
             conn.commit()
@@ -333,14 +481,19 @@ class POSDatabase:
         with self.get_connection() as conn:
             query = '''
                 SELECT 
-                    p.id as product_id, p.name as product_name, p.brand,
-                    v.id as variant_id, v.name as variant_name, v.stock_qty, v.reorder_level,
-                    s.name as supplier_name, s.phone as supplier_phone, s.email as supplier_email
+                    p.id as product_id, p.name as product_name, 
+                    v.id as variant_id, v.name as variant_name, v.price as price, 
+                    v.stock_quantity, v.reorder_level,
+                    s.name as supplier_name, s.phone as supplier_phone, s.email as supplier_email,
+                    b.name as brand_name,
+                    c.name as category_name
                 FROM products p
                 JOIN variants v ON p.id = v.product_id
                 LEFT JOIN suppliers s ON p.supplier_id = s.id
-                WHERE v.stock_qty <= v.reorder_level
-                ORDER BY v.stock_qty ASC
+                LEFT JOIN brands b ON p.brand_id = b.id
+                LEFT JOIN categories c ON p.category_id = c.id
+                WHERE v.stock_quantity <= v.reorder_level
+                ORDER BY v.stock_quantity ASC
             '''
             results = conn.execute(query).fetchall()
             return [dict(row) for row in results]
@@ -396,7 +549,7 @@ class POSDatabase:
             )
             # Update stock
             conn.execute(
-                "UPDATE variants SET stock_qty = stock_qty - ? WHERE id = ?",
+                "UPDATE variants SET stock_quantity = stock_quantity - ? WHERE id = ?",
                 (qty, variant_id)
             )
             conn.commit()
@@ -411,11 +564,13 @@ class POSDatabase:
             items_query = '''
                 SELECT 
                     si.qty, si.price, si.subtotal,
-                    p.name as product_name, p.brand,
+                    p.name as product_name, 
+                    b.name as brand_name,
                     v.name as variant_name
                 FROM sale_items si
                 JOIN products p ON si.product_id = p.id
                 JOIN variants v ON si.variant_id = v.id
+                LEFT JOIN brands b ON p.brand_id = b.id
                 WHERE si.sale_id = ?
             '''
             items = conn.execute(items_query, (sale_id,)).fetchall()

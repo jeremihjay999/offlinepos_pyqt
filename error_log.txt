@@ -1,0 +1,21 @@
+C:\Users\Jeremy Jay\Desktop\offlinepos\main.py:199: DeprecationWarning: sipPyTypeDict() is deprecated, the extension module should use sipPyTypeDictRef() instead
+  class POSMainWindow(QMainWindow):
+Adding stock_quantity column to variants table...
+Successfully added stock_quantity column to variants table.
+Traceback (most recent call last):
+  File "C:\Users\Jeremy Jay\Desktop\offlinepos\main.py", line 1435, in <module>
+    sys.exit(app.run())
+             ^^^^^^^^^
+  File "C:\Users\Jeremy Jay\Desktop\offlinepos\main.py", line 1420, in run
+    main_window = POSMainWindow(self.db, login_dialog.user)
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Jeremy Jay\Desktop\offlinepos\main.py", line 211, in __init__
+    self.init_ui()
+  File "C:\Users\Jeremy Jay\Desktop\offlinepos\main.py", line 272, in init_ui
+    self.create_sales_tab()
+  File "C:\Users\Jeremy Jay\Desktop\offlinepos\main.py", line 413, in create_sales_tab
+    self.load_products()
+  File "C:\Users\Jeremy Jay\Desktop\offlinepos\main.py", line 614, in load_products
+    stock_color = "#28a745" if product['stock_qty'] > product['reorder_level'] else "#ffc107" if product['stock_qty'] > 0 else "#dc3545"
+                               ~~~~~~~^^^^^^^^^^^^^
+KeyError: 'stock_qty'

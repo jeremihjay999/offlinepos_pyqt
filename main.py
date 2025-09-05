@@ -11,7 +11,28 @@ class LoginDialog(QDialog):
         super().__init__()
         self.db = db
         self.user = None
+        self.buttons = []
+        self.focus_widgets = []
+        self.current_focus = 0
         self.init_ui()
+    
+    def keyPressEvent(self, event):
+        # Handle arrow key navigation
+        if event.key() == Qt.Key_Down:
+            self.navigate(1)
+        elif event.key() == Qt.Key_Up:
+            self.navigate(-1)
+        elif event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            if self.focusWidget() in [self.login_btn, self.cancel_btn]:
+                self.focusWidget().click()
+            else:
+                self.navigate(1)
+        else:
+            super().keyPressEvent(event)
+    
+    def navigate(self, direction):
+        self.current_focus = (self.current_focus + direction) % len(self.focus_widgets)
+        self.focus_widgets[self.current_focus].setFocus()
         
     def init_ui(self):
         self.setWindowTitle("POS System - Login")
@@ -37,9 +58,14 @@ class LoginDialog(QDialog):
                 border: none;
                 border-radius: 4px;
                 font-size: 14px;
+                min-width: 100px;
             }
-            QPushButton:hover {
+            QPushButton:hover, QPushButton:focus {
                 background-color: #0056b3;
+                border: 2px solid #003d82;
+            }
+            QPushButton:focus {
+                border: 2px solid #0056b3;
             }
         """)
         
@@ -67,15 +93,18 @@ class LoginDialog(QDialog):
         
         # Buttons
         button_layout = QHBoxLayout()
+        button_layout.setSpacing(20)
         
-        login_btn = QPushButton("Login")
-        login_btn.clicked.connect(self.login)
+        self.login_btn = QPushButton("Login")
+        self.login_btn.clicked.connect(self.login)
         
-        cancel_btn = QPushButton("Cancel")
-        cancel_btn.clicked.connect(self.reject)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
         
-        button_layout.addWidget(login_btn)
-        button_layout.addWidget(cancel_btn)
+        button_layout.addStretch()
+        button_layout.addWidget(self.login_btn)
+        button_layout.addWidget(self.cancel_btn)
+        button_layout.addStretch()
         
         layout.addLayout(button_layout)
         
@@ -87,8 +116,24 @@ class LoginDialog(QDialog):
         
         self.setLayout(layout)
         
-        # Enter key handling
-        self.password_input.returnPressed.connect(self.login)
+        # Set up focus navigation
+        self.focus_widgets = [
+            self.username_input,
+            self.password_input,
+            self.login_btn,
+            self.cancel_btn
+        ]
+        
+        # Set initial focus
+        self.username_input.setFocus()
+        self.current_focus = 0
+        
+        # Enable tab and return key navigation
+        for i, widget in enumerate(self.focus_widgets):
+            widget.setFocusPolicy(Qt.StrongFocus)
+            # Only connect returnPressed for QLineEdit widgets
+            if isinstance(widget, QLineEdit) and i < len(self.focus_widgets) - 1:
+                widget.returnPressed.connect(lambda: self.navigate(1))
         
     def login(self):
         username = self.username_input.text().strip()
@@ -96,6 +141,8 @@ class LoginDialog(QDialog):
         
         if not username or not password:
             QMessageBox.warning(self, "Error", "Please enter both username and password")
+            self.username_input.setFocus()
+            self.current_focus = 0
             return
             
         user = self.db.authenticate_user(username, password)
@@ -105,6 +152,8 @@ class LoginDialog(QDialog):
         else:
             QMessageBox.critical(self, "Login Failed", "Invalid username or password")
             self.password_input.clear()
+            self.password_input.setFocus()
+            self.current_focus = 1
 
 class ShiftDialog(QDialog):
     def __init__(self, db: POSDatabase, user_id: int):
@@ -152,6 +201,7 @@ class POSMainWindow(QMainWindow):
         super().__init__()
         self.db = db
         self.user = user
+        self.should_logout = False
         self.current_shift = None
         self.cart_items = []
         
@@ -376,7 +426,7 @@ class POSMainWindow(QMainWindow):
             toolbar.addWidget(add_product_btn)
             
             add_supplier_btn = QPushButton("Add Supplier")
-            add_supplier_btn.clicked.connect(self.add_supplier_dialog)
+            add_supplier_btn.clicked.connect(self.show_add_supplier_dialog)
             toolbar.addWidget(add_supplier_btn)
         
         refresh_btn = QPushButton("Refresh")
@@ -554,14 +604,15 @@ class POSMainWindow(QMainWindow):
             name_label.setWordWrap(True)
             card_layout.addWidget(name_label)
             
-            # Variant and price
-            variant_label = QLabel(f"{product['variant_name']} - ${product['price']:.2f}")
+            # Variant and price (inclusive of tax)
+            price_with_tax = self.get_price_with_tax(product['price'])
+            variant_label = QLabel(f"{product['variant_name']} - ${price_with_tax:.2f}")
             variant_label.setStyleSheet("color: #666; font-size: 10px;")
             card_layout.addWidget(variant_label)
             
             # Stock
-            stock_color = "#28a745" if product['stock_qty'] > product['reorder_level'] else "#ffc107" if product['stock_qty'] > 0 else "#dc3545"
-            stock_label = QLabel(f"Stock: {product['stock_qty']}")
+            stock_color = "#28a745" if product['stock_quantity'] > product['reorder_level'] else "#ffc107" if product['stock_quantity'] > 0 else "#dc3545"
+            stock_label = QLabel(f"Stock: {product['stock_quantity']}")
             stock_label.setStyleSheet(f"color: {stock_color}; font-size: 10px;")
             card_layout.addWidget(stock_label)
             
@@ -586,10 +637,11 @@ class POSMainWindow(QMainWindow):
             if product['variant_id'] is None:
                 continue
                 
+            price_with_tax = self.get_price_with_tax(product['price'])
             self.products_table.setItem(row_idx, 0, QTableWidgetItem(product['product_name']))
             self.products_table.setItem(row_idx, 1, QTableWidgetItem(product['variant_name'] or ''))
-            self.products_table.setItem(row_idx, 2, QTableWidgetItem(f"${product['price']:.2f}"))
-            self.products_table.setItem(row_idx, 3, QTableWidgetItem(str(product['stock_qty'])))
+            self.products_table.setItem(row_idx, 2, QTableWidgetItem(f"${price_with_tax:.2f}"))
+            self.products_table.setItem(row_idx, 3, QTableWidgetItem(str(product['stock_quantity'])))
             
             add_btn = QPushButton("Add")
             add_btn.clicked.connect(lambda checked, p=product: self.add_to_cart(p))
@@ -622,7 +674,7 @@ class POSMainWindow(QMainWindow):
         
     def add_to_cart(self, product):
         """Add product to cart"""
-        if product['stock_qty'] <= 0:
+        if product['stock_quantity'] <= 0:
             QMessageBox.warning(self, "Out of Stock", "This item is out of stock!")
             return
             
@@ -630,7 +682,7 @@ class POSMainWindow(QMainWindow):
         for i, cart_item in enumerate(self.cart_items):
             if cart_item['variant_id'] == product['variant_id']:
                 # Increase quantity
-                if cart_item['qty'] < product['stock_qty']:
+                if cart_item['qty'] < product['stock_quantity']:
                     self.cart_items[i]['qty'] += 1
                     self.cart_items[i]['total'] = self.cart_items[i]['qty'] * self.cart_items[i]['price']
                 else:
@@ -775,19 +827,20 @@ class POSMainWindow(QMainWindow):
         self.products_mgmt_table.setRowCount(len(products))
         
         for i, product in enumerate(products):
+            price_with_tax = self.get_price_with_tax(product['price'])
             self.products_mgmt_table.setItem(i, 0, QTableWidgetItem(product['product_name']))
-            self.products_mgmt_table.setItem(i, 1, QTableWidgetItem(product.get('brand', '') or ''))
+            self.products_mgmt_table.setItem(i, 1, QTableWidgetItem(product.get('brand_name', '') or ''))
             self.products_mgmt_table.setItem(i, 2, QTableWidgetItem(product['variant_name'] or ''))
-            self.products_mgmt_table.setItem(i, 3, QTableWidgetItem(f"${product['price']:.2f}"))
-            self.products_mgmt_table.setItem(i, 4, QTableWidgetItem(str(product['stock_qty'])))
+            self.products_mgmt_table.setItem(i, 3, QTableWidgetItem(f"${price_with_tax:.2f}"))
+            self.products_mgmt_table.setItem(i, 4, QTableWidgetItem(str(product['stock_quantity'])))
             self.products_mgmt_table.setItem(i, 5, QTableWidgetItem(str(product['reorder_level'])))
             self.products_mgmt_table.setItem(i, 6, QTableWidgetItem(product.get('supplier_name', '') or ''))
             
             # Status
-            if product['stock_qty'] <= 0:
+            if product['stock_quantity'] <= 0:
                 status = "Out of Stock"
                 color = "#dc3545"
-            elif product['stock_qty'] <= product['reorder_level']:
+            elif product['stock_quantity'] <= product['reorder_level']:
                 status = "Low Stock"
                 color = "#ffc107"
             else:
@@ -803,7 +856,7 @@ class POSMainWindow(QMainWindow):
             actions_layout = QHBoxLayout()
             actions_layout.setContentsMargins(0, 0, 0, 0)
             
-            if product['stock_qty'] <= product['reorder_level'] and product.get('supplier_name'):
+            if product['stock_quantity'] <= product['reorder_level'] and product.get('supplier_name'):
                 reorder_btn = QPushButton("Re-order")
                 reorder_btn.setStyleSheet("background-color: #ffc107; color: black;")
                 reorder_btn.clicked.connect(lambda checked, p=product: self.show_reorder_info(p))
@@ -825,7 +878,7 @@ class POSMainWindow(QMainWindow):
         
         info_text = f"""
         Product: {product['product_name']} ({product['variant_name']})
-        Current Stock: {product['stock_qty']}
+        Current Stock: {product['stock_quantity']}
         Reorder Level: {product['reorder_level']}
         
         Supplier Information:
@@ -945,14 +998,334 @@ TOP PRODUCTS
         dialog.exec_()
         
     def add_product_dialog(self):
-        """Show add product dialog"""
-        # TODO: Implement comprehensive product addition dialog
-        QMessageBox.information(self, "Add Product", "Product addition dialog will be implemented here.")
+        """Show add product dialog with variant support"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add Product")
+        dialog.setMinimumWidth(500)
         
-    def add_supplier_dialog(self):
-        """Show add supplier dialog"""
-        # TODO: Implement supplier addition dialog
-        QMessageBox.information(self, "Add Supplier", "Supplier addition dialog will be implemented here.")
+        layout = QVBoxLayout()
+        
+        # Product Details
+        details_group = QGroupBox("Product Details")
+        form_layout = QFormLayout()
+        
+        # Product Name
+        self.product_name_input = QLineEdit()
+        form_layout.addRow("Product Name*:", self.product_name_input)
+        
+        # Barcode
+        self.barcode_input = QLineEdit()
+        form_layout.addRow("Barcode:", self.barcode_input)
+        
+        # Category with Add button
+        category_layout = QHBoxLayout()
+        self.category_combo = QComboBox()
+        self.category_combo.setMinimumWidth(200)
+        self.load_categories()
+        
+        add_category_btn = QPushButton("+")
+        add_category_btn.setFixedWidth(30)
+        add_category_btn.setToolTip("Add new category")
+        add_category_btn.clicked.connect(self.show_add_category_dialog)
+        
+        category_layout.addWidget(self.category_combo)
+        category_layout.addWidget(add_category_btn)
+        form_layout.addRow("Category:", category_layout)
+        
+        # Brand with Add button
+        brand_layout = QHBoxLayout()
+        self.brand_combo = QComboBox()
+        self.brand_combo.setMinimumWidth(200)
+        self.load_brands()
+        
+        add_brand_btn = QPushButton("+")
+        add_brand_btn.setFixedWidth(30)
+        add_brand_btn.setToolTip("Add new brand")
+        add_brand_btn.clicked.connect(self.show_add_brand_dialog)
+        
+        brand_layout.addWidget(self.brand_combo)
+        brand_layout.addWidget(add_brand_btn)
+        form_layout.addRow("Brand:", brand_layout)
+        
+        # Supplier
+        supplier_layout = QHBoxLayout()
+        self.supplier_combo = QComboBox()
+        self.supplier_combo.setMinimumWidth(300)
+        self.suppliers = self.db.get_all_suppliers()
+        self.supplier_combo.addItem("Select Supplier", None)
+        for supplier in self.suppliers:
+            self.supplier_combo.addItem(supplier['name'], supplier['id'])
+            
+        add_supplier_btn = QPushButton("New Supplier")
+        add_supplier_btn.clicked.connect(self.show_add_supplier_dialog)
+        
+        supplier_layout.addWidget(self.supplier_combo)
+        supplier_layout.addWidget(add_supplier_btn)
+        form_layout.addRow("Supplier:", supplier_layout)
+        
+        # Removed description field as per requirements
+        
+        # Variants
+        self.variants_table = QTableWidget()
+        self.variants_table.setColumnCount(4)
+        self.variants_table.setHorizontalHeaderLabels(["Variant Name", "Price", "Stock", "Reorder Level"])
+        self.variants_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        
+        # Buttons for variants
+        variant_buttons = QHBoxLayout()
+        add_variant_btn = QPushButton("Add Variant")
+        add_variant_btn.clicked.connect(self.add_variant_row)
+        remove_variant_btn = QPushButton("Remove Selected")
+        remove_variant_btn.clicked.connect(self.remove_selected_variant)
+        variant_buttons.addWidget(add_variant_btn)
+        variant_buttons.addWidget(remove_variant_btn)
+        
+        form_layout.addRow("Variants:", QLabel(""))
+        form_layout.addRow(self.variants_table)
+        form_layout.addRow(variant_buttons)
+        
+        # Add a default variant row
+        self.add_variant_row()
+        
+        details_group.setLayout(form_layout)
+        layout.addWidget(details_group)
+        
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(lambda: self.save_product(dialog))
+        button_box.rejected.connect(dialog.reject)
+        
+        layout.addWidget(button_box)
+        dialog.setLayout(layout)
+        dialog.exec_()
+        
+    def add_variant_row(self, variant_name="", price=0, stock=0, reorder_level=5):
+        """Add a new variant row to the variants table"""
+        row = self.variants_table.rowCount()
+        self.variants_table.insertRow(row)
+        
+        # Variant name
+        name_item = QTableWidgetItem(variant_name)
+        self.variants_table.setItem(row, 0, name_item)
+        
+        # Price
+        price_item = QTableWidgetItem(f"{price:.2f}")
+        price_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.variants_table.setItem(row, 1, price_item)
+        
+        # Stock
+        stock_item = QTableWidgetItem(str(stock))
+        stock_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.variants_table.setItem(row, 2, stock_item)
+        
+        # Reorder Level
+        reorder_item = QTableWidgetItem(str(reorder_level))
+        reorder_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.variants_table.setItem(row, 3, reorder_item)
+        
+        # Select the new row
+        self.variants_table.selectRow(row)
+        
+    def load_categories(self):
+        """Load categories into the combo box"""
+        self.category_combo.clear()
+        self.category_combo.addItem("Select Category", None)
+        categories = self.db.get_all_categories()
+        for cat in categories:
+            self.category_combo.addItem(cat['name'], cat['id'])
+            
+    def load_brands(self):
+        """Load brands into the combo box"""
+        self.brand_combo.clear()
+        self.brand_combo.addItem("Select Brand", None)
+        brands = self.db.get_all_brands()
+        for brand in brands:
+            self.brand_combo.addItem(brand['name'], brand['id'])
+            
+    def show_add_category_dialog(self):
+        """Show dialog to add a new category"""
+        name, ok = QInputDialog.getText(
+            self, "Add Category", "Category Name:", 
+            QLineEdit.Normal, ""
+        )
+        
+        if ok and name.strip():
+            try:
+                category_id = self.db.add_category(name=name.strip())
+                self.load_categories()
+                # Select the newly added category
+                index = self.category_combo.findData(category_id)
+                if index >= 0:
+                    self.category_combo.setCurrentIndex(index)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to add category: {str(e)}")
+    
+    def show_add_brand_dialog(self):
+        """Show dialog to add a new brand"""
+        name, ok = QInputDialog.getText(
+            self, "Add Brand", "Brand Name:", 
+            QLineEdit.Normal, ""
+        )
+        
+        if ok and name.strip():
+            try:
+                brand_id = self.db.add_brand(name=name.strip())
+                self.load_brands()
+                # Select the newly added brand
+                index = self.brand_combo.findData(brand_id)
+                if index >= 0:
+                    self.brand_combo.setCurrentIndex(index)
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to add brand: {str(e)}")
+    
+    def remove_selected_variant(self):
+        """Remove selected variant row"""
+        selected = self.variants_table.selectionModel().selectedRows()
+        for idx in sorted(selected, reverse=True):
+            self.variants_table.removeRow(idx.row())
+            
+    def save_product(self, dialog):
+        """Save the product and its variants"""
+        # Validate inputs
+        product_name = self.product_name_input.text().strip()
+        if not product_name:
+            QMessageBox.warning(self, "Validation Error", "Product name is required!")
+            return
+            
+        # Check if at least one variant exists
+        if self.variants_table.rowCount() == 0:
+            QMessageBox.warning(self, "Validation Error", "At least one variant is required!")
+            return
+            
+        # Validate variants
+        variants = []
+        for row in range(self.variants_table.rowCount()):
+            variant_name = self.variants_table.item(row, 0).text().strip()
+            price = self.variants_table.item(row, 1).text().strip()
+            stock = self.variants_table.item(row, 2).text().strip()
+            reorder_level = self.variants_table.item(row, 3).text().strip()
+            
+            if not variant_name:
+                QMessageBox.warning(self, "Validation Error", f"Variant name is required for row {row + 1}")
+                return
+                
+            try:
+                price = float(price)
+                stock = int(stock)
+                reorder_level = int(reorder_level)
+                if price < 0 or stock < 0 or reorder_level < 0:
+                    raise ValueError("Negative values not allowed")
+            except (ValueError, AttributeError):
+                QMessageBox.warning(self, "Validation Error", 
+                                  f"Invalid price, stock or reorder level value in row {row + 1}")
+                return
+                
+            variants.append({
+                'name': variant_name,
+                'price': price,
+                'stock': stock,
+                'reorder_level': reorder_level
+            })
+        
+        # Get other product details
+        barcode = self.barcode_input.text().strip() or None
+        
+        # Check if barcode already exists
+        if barcode and self.db.get_product_by_barcode(barcode):
+            QMessageBox.warning(self, "Validation Error", "A product with this barcode already exists!")
+            return
+
+        category_id = self.category_combo.currentData()
+        brand_id = self.brand_combo.currentData()
+        supplier_id = self.supplier_combo.currentData()
+        
+        # Start transaction
+        try:
+            # Save product
+            product_id = self.db.add_product(
+                name=product_name,
+                category_id=category_id,
+                brand_id=brand_id,
+                supplier_id=supplier_id,
+                barcode=barcode
+            )
+            
+            # Save variants
+            for variant in variants:
+                self.db.add_product_variant(
+                    product_id=product_id,
+                    name=variant['name'],
+                    price=variant['price'],
+                    stock_quantity=variant['stock'],
+                    reorder_level=variant['reorder_level']
+                )
+                
+            QMessageBox.information(self, "Success", "Product added successfully!")
+            dialog.accept()
+            self.refresh_products_table()
+            self.load_products()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save product: {str(e)}")
+        
+    def show_add_supplier_dialog(self):
+        """Show dialog to add a new supplier"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add New Supplier")
+        dialog.setMinimumWidth(400)
+        
+        layout = QFormLayout()
+        
+        # Supplier fields
+        name_input = QLineEdit()
+        email_input = QLineEdit()
+        phone_input = QLineEdit()
+        address_input = QTextEdit()
+        address_input.setMaximumHeight(60)
+        
+        layout.addRow("Supplier Name*:", name_input)
+        layout.addRow("Email:", email_input)
+        layout.addRow("Phone:", phone_input)
+        layout.addRow("Address:", address_input)
+        
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        
+        def save_supplier():
+            name = name_input.text().strip()
+            if not name:
+                QMessageBox.warning(dialog, "Validation Error", "Supplier name is required!")
+                return
+                
+            try:
+                supplier_id = self.db.add_supplier(
+                    name=name,
+                    email=email_input.text().strip() or None,
+                    phone=phone_input.text().strip() or None,
+                    address=address_input.toPlainText().strip() or None
+                )
+                
+                # Update the supplier combo
+                self.suppliers = self.db.get_all_suppliers()
+                self.supplier_combo.clear()
+                self.supplier_combo.addItem("Select Supplier", None)
+                for supplier in self.suppliers:
+                    self.supplier_combo.addItem(supplier['name'], supplier['id'])
+                    if supplier['id'] == supplier_id:
+                        self.supplier_combo.setCurrentIndex(self.supplier_combo.count() - 1)
+                
+                dialog.accept()
+                QMessageBox.information(self, "Success", "Supplier added successfully!")
+                
+            except Exception as e:
+                QMessageBox.critical(dialog, "Error", f"Failed to add supplier: {str(e)}")
+        
+        button_box.accepted.connect(save_supplier)
+        button_box.rejected.connect(dialog.reject)
+        
+        layout.addRow(button_box)
+        dialog.setLayout(layout)
+        dialog.exec_()
         
     def edit_product(self, product):
         """Edit product"""
@@ -999,10 +1372,21 @@ TOP PRODUCTS
             self.check_shift()
             
     def logout(self):
-        """Logout current user"""
+        """Logout current user and return to login screen"""
         reply = QMessageBox.question(self, "Logout", "Are you sure you want to logout?")
         if reply == QMessageBox.Yes:
+            # Set flag to indicate logout was requested
+            self.should_logout = True
+            # Close the current window
             self.close()
+            
+    def get_price_with_tax(self, price: float) -> float:
+        """Calculate price including tax"""
+        try:
+            tax_rate = float(self.db.get_setting('tax_rate') or '0') / 100
+            return price * (1 + tax_rate)
+        except (ValueError, TypeError):
+            return price
             
     def update_status_bar(self):
         """Update status bar with current info"""
