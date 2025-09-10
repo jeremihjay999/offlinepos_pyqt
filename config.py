@@ -56,7 +56,7 @@ PRICE_FORMAT = "%.2f"  # Format for displaying prices
 
 # Tax Configuration
 DEFAULT_TAX_RATE = 16.0  # Default tax rate percentage
-TAX_INCLUSIVE = False  # Whether displayed prices include tax
+TAX_INCLUSIVE = True  # Whether displayed prices include tax
 
 # Report Configuration
 REPORTS_EXPORT_DIR = "reports"  # Directory for exported reports

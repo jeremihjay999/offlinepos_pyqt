@@ -5,6 +5,7 @@ from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from db import POSDatabase
+from config import TAX_INCLUSIVE
 
 class LoginDialog(QDialog):
     def __init__(self, db: POSDatabase):
@@ -568,7 +569,7 @@ class POSMainWindow(QMainWindow):
         products = self.db.get_products_with_variants()
         
         # Clear existing items
-        for i in reversed(range(self.grid_layout.count())): 
+        for i in reversed(range(self.grid_layout.count())):
             self.grid_layout.itemAt(i).widget().setParent(None)
             
         self.products_table.setRowCount(0)
@@ -691,13 +692,15 @@ class POSMainWindow(QMainWindow):
                 break
         else:
             # Add new item
+            price = float(product['price'])
+            # Price from DB is already tax-inclusive if TAX_INCLUSIVE is True
             cart_item = {
                 'product_id': product['product_id'],
                 'variant_id': product['variant_id'],
                 'name': f"{product['product_name']} ({product['variant_name']})",
-                'price': float(product['price']),
+                'price': price,
                 'qty': 1,
-                'total': float(product['price'])
+                'total': price
             }
             self.cart_items.append(cart_item)
             
@@ -731,12 +734,20 @@ class POSMainWindow(QMainWindow):
             
         # Calculate totals
         tax_rate = float(self.db.get_setting('tax_rate') or '0') / 100
-        tax_amount = subtotal * tax_rate
-        total = subtotal + tax_amount
+        
+        if TAX_INCLUSIVE:
+            total = subtotal
+            subtotal_before_tax = total / (1 + tax_rate)
+            tax_amount = total - subtotal_before_tax
+            subtotal_display = subtotal_before_tax
+        else:
+            tax_amount = subtotal * tax_rate
+            total = subtotal + tax_amount
+            subtotal_display = subtotal
         
         # Update labels
         currency = self.db.get_setting('currency_symbol') or '$'
-        self.subtotal_label.setText(f"Subtotal: {currency}{subtotal:.2f}")
+        self.subtotal_label.setText(f"Subtotal: {currency}{subtotal_display:.2f}")
         self.tax_label.setText(f"Tax: {currency}{tax_amount:.2f}")
         self.discount_label.setText(f"Discount: {currency}0.00")  # TODO: Implement discounts
         self.total_label.setText(f"Total: {currency}{total:.2f}")
@@ -769,8 +780,13 @@ class POSMainWindow(QMainWindow):
         # Calculate total
         subtotal = sum(item['total'] for item in self.cart_items)
         tax_rate = float(self.db.get_setting('tax_rate') or '0') / 100
-        tax_amount = subtotal * tax_rate
-        total = subtotal + tax_amount
+        
+        if TAX_INCLUSIVE:
+            total = subtotal
+            tax_amount = total - (total / (1 + tax_rate))
+        else:
+            tax_amount = subtotal * tax_rate
+            total = subtotal + tax_amount
         
         # Cash payment dialog
         cash_received, ok = QInputDialog.getDouble(
@@ -786,9 +802,13 @@ class POSMainWindow(QMainWindow):
             
             # Add sale items
             for item in self.cart_items:
+                base_price = item['price']
+                if TAX_INCLUSIVE:
+                    base_price = item['price'] / (1 + tax_rate)
+                
                 self.db.add_sale_item(
                     sale_id, item['product_id'], item['variant_id'],
-                    item['qty'], item['price'], item['total']
+                    item['qty'], base_price, item['qty'] * base_price
                 )
                 
             # Show change
@@ -856,7 +876,7 @@ class POSMainWindow(QMainWindow):
             actions_layout = QHBoxLayout()
             actions_layout.setContentsMargins(0, 0, 0, 0)
             
-            if product['stock_quantity'] <= product['reorder_level'] and product.get('supplier_name'):
+            if product.get('supplier_name'):
                 reorder_btn = QPushButton("Re-order")
                 reorder_btn.setStyleSheet("background-color: #ffc107; color: black;")
                 reorder_btn.clicked.connect(lambda checked, p=product: self.show_reorder_info(p))
@@ -1071,6 +1091,9 @@ TOP PRODUCTS
         self.variants_table.setHorizontalHeaderLabels(["Variant Name", "Price", "Stock", "Reorder Level"])
         self.variants_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         
+        # Add a default variant row
+        self.add_variant_row()
+        
         # Buttons for variants
         variant_buttons = QHBoxLayout()
         add_variant_btn = QPushButton("Add Variant")
@@ -1084,9 +1107,6 @@ TOP PRODUCTS
         form_layout.addRow(self.variants_table)
         form_layout.addRow(variant_buttons)
         
-        # Add a default variant row
-        self.add_variant_row()
-        
         details_group.setLayout(form_layout)
         layout.addWidget(details_group)
         
@@ -1099,13 +1119,15 @@ TOP PRODUCTS
         dialog.setLayout(layout)
         dialog.exec_()
         
-    def add_variant_row(self, variant_name="", price=0, stock=0, reorder_level=5):
+    def add_variant_row(self, variant_name="", price=0, stock=0, reorder_level=5, variant_id=None):
         """Add a new variant row to the variants table"""
         row = self.variants_table.rowCount()
         self.variants_table.insertRow(row)
         
         # Variant name
         name_item = QTableWidgetItem(variant_name)
+        if variant_id:
+            name_item.setData(Qt.UserRole, variant_id)
         self.variants_table.setItem(row, 0, name_item)
         
         # Price
@@ -1289,7 +1311,7 @@ TOP PRODUCTS
         layout.addRow("Address:", address_input)
         
         # Buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogDialogButtonBox.Cancel)
         
         def save_supplier():
             name = name_input.text().strip()
@@ -1329,8 +1351,199 @@ TOP PRODUCTS
         
     def edit_product(self, product):
         """Edit product"""
-        # TODO: Implement product editing
-        QMessageBox.information(self, "Edit Product", f"Edit dialog for {product['product_name']} will be implemented here.")
+        self.edit_product_dialog(product)
+
+    def edit_product_dialog(self, product):
+        """Show edit product dialog with variant support"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Edit Product")
+        dialog.setMinimumWidth(500)
+
+        layout = QVBoxLayout()
+
+        # Product Details
+        details_group = QGroupBox("Product Details")
+        form_layout = QFormLayout()
+
+        # Product Name
+        self.product_name_input = QLineEdit(product['product_name'])
+        form_layout.addRow("Product Name*:", self.product_name_input)
+
+        # Barcode
+        self.barcode_input = QLineEdit(product.get('barcode', '') or '')
+        form_layout.addRow("Barcode:", self.barcode_input)
+
+        # Category with Add button
+        category_layout = QHBoxLayout()
+        self.category_combo = QComboBox()
+        self.category_combo.setMinimumWidth(200)
+        self.load_categories()
+        if product.get('category_id'):
+            index = self.category_combo.findData(product['category_id'])
+            if index >= 0:
+                self.category_combo.setCurrentIndex(index)
+
+        add_category_btn = QPushButton("+")
+        add_category_btn.setFixedWidth(30)
+        add_category_btn.setToolTip("Add new category")
+        add_category_btn.clicked.connect(self.show_add_category_dialog)
+
+        category_layout.addWidget(self.category_combo)
+        category_layout.addWidget(add_category_btn)
+        form_layout.addRow("Category:", category_layout)
+
+        # Brand with Add button
+        brand_layout = QHBoxLayout()
+        self.brand_combo = QComboBox()
+        self.brand_combo.setMinimumWidth(200)
+        self.load_brands()
+        if product.get('brand_id'):
+            index = self.brand_combo.findData(product['brand_id'])
+            if index >= 0:
+                self.brand_combo.setCurrentIndex(index)
+
+        add_brand_btn = QPushButton("+")
+        add_brand_btn.setFixedWidth(30)
+        add_brand_btn.setToolTip("Add new brand")
+        add_brand_btn.clicked.connect(self.show_add_brand_dialog)
+
+        brand_layout.addWidget(self.brand_combo)
+        brand_layout.addWidget(add_brand_btn)
+        form_layout.addRow("Brand:", brand_layout)
+
+        # Supplier
+        supplier_layout = QHBoxLayout()
+        self.supplier_combo = QComboBox()
+        self.supplier_combo.setMinimumWidth(300)
+        self.suppliers = self.db.get_all_suppliers()
+        self.supplier_combo.addItem("Select Supplier", None)
+        for supplier in self.suppliers:
+            self.supplier_combo.addItem(supplier['name'], supplier['id'])
+        if product.get('supplier_id'):
+            index = self.supplier_combo.findData(product['supplier_id'])
+            if index >= 0:
+                self.supplier_combo.setCurrentIndex(index)
+
+        add_supplier_btn = QPushButton("New Supplier")
+        add_supplier_btn.clicked.connect(self.show_add_supplier_dialog)
+
+        supplier_layout.addWidget(self.supplier_combo)
+        supplier_layout.addWidget(add_supplier_btn)
+        form_layout.addRow("Supplier:", supplier_layout)
+
+        # Variants
+        self.variants_table = QTableWidget()
+        self.variants_table.setColumnCount(4)
+        self.variants_table.setHorizontalHeaderLabels(["Variant Name", "Price", "Stock", "Reorder Level"])
+        self.variants_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
+        variants = self.db.get_variants_for_product(product['product_id'])
+        for variant in variants:
+            self.add_variant_row(variant['name'], variant['price'], variant['stock_quantity'], variant['reorder_level'], variant['id'])
+
+        # Buttons for variants
+        variant_buttons = QHBoxLayout()
+        add_variant_btn = QPushButton("Add Variant")
+        add_variant_btn.clicked.connect(self.add_variant_row)
+        remove_variant_btn = QPushButton("Remove Selected")
+        remove_variant_btn.clicked.connect(self.remove_selected_variant)
+        variant_buttons.addWidget(add_variant_btn)
+        variant_buttons.addWidget(remove_variant_btn)
+
+        form_layout.addRow("Variants:", QLabel(""))
+        form_layout.addRow(self.variants_table)
+        form_layout.addRow(variant_buttons)
+
+        details_group.setLayout(form_layout)
+        layout.addWidget(details_group)
+
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(lambda: self.save_edited_product(dialog, product['product_id']))
+        button_box.rejected.connect(dialog.reject)
+
+        layout.addWidget(button_box)
+        dialog.setLayout(layout)
+        dialog.exec_()
+
+    def save_edited_product(self, dialog, product_id):
+        """Save the edited product and its variants"""
+        # Validate inputs
+        product_name = self.product_name_input.text().strip()
+        if not product_name:
+            QMessageBox.warning(self, "Validation Error", "Product name is required!")
+            return
+
+        # Check if at least one variant exists
+        if self.variants_table.rowCount() == 0:
+            QMessageBox.warning(self, "Validation Error", "At least one variant is required!")
+            return
+
+        # Validate variants
+        variants = []
+        for row in range(self.variants_table.rowCount()):
+            variant_id = self.variants_table.item(row, 0).data(Qt.UserRole)
+            variant_name = self.variants_table.item(row, 0).text().strip()
+            price = self.variants_table.item(row, 1).text().strip()
+            stock = self.variants_table.item(row, 2).text().strip()
+            reorder_level = self.variants_table.item(row, 3).text().strip()
+
+            if not variant_name:
+                QMessageBox.warning(self, "Validation Error", f"Variant name is required for row {row + 1}")
+                return
+
+            try:
+                price = float(price)
+                stock = int(stock)
+                reorder_level = int(reorder_level)
+                if price < 0 or stock < 0 or reorder_level < 0:
+                    raise ValueError("Negative values not allowed")
+            except (ValueError, AttributeError):
+                QMessageBox.warning(self, "Validation Error",
+                                  f"Invalid price, stock or reorder level value in row {row + 1}")
+                return
+
+            variants.append({
+                'id': variant_id,
+                'name': variant_name,
+                'price': price,
+                'stock': stock,
+                'reorder_level': reorder_level
+            })
+
+        # Get other product details
+        barcode = self.barcode_input.text().strip() or None
+
+        # Check if barcode already exists
+        existing_product = self.db.get_product_by_barcode(barcode)
+        if barcode and existing_product and existing_product['id'] != product_id:
+            QMessageBox.warning(self, "Validation Error", "A product with this barcode already exists!")
+            return
+
+        category_id = self.category_combo.currentData()
+        brand_id = self.brand_combo.currentData()
+        supplier_id = self.supplier_combo.currentData()
+
+        # Start transaction
+        try:
+            # Save product
+            self.db.update_product(
+                product_id=product_id,
+                name=product_name,
+                category_id=category_id,
+                brand_id=brand_id,
+                supplier_id=supplier_id,
+                barcode=barcode,
+                variants=variants
+            )
+
+            QMessageBox.information(self, "Success", "Product updated successfully!")
+            dialog.accept()
+            self.refresh_products_table()
+            self.load_products()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save product: {str(e)}")
         
     def backup_database(self):
         """Backup database"""
@@ -1381,7 +1594,13 @@ TOP PRODUCTS
             self.close()
             
     def get_price_with_tax(self, price: float) -> float:
-        """Calculate price including tax"""
+        """
+        If prices are tax-inclusive, returns the price as is.
+        If prices are tax-exclusive, calculates and returns the price with tax.
+        """
+        if TAX_INCLUSIVE:
+            return price
+        
         try:
             tax_rate = float(self.db.get_setting('tax_rate') or '0') / 100
             return price * (1 + tax_rate)

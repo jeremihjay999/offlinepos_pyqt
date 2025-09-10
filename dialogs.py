@@ -2,6 +2,7 @@ from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from db import POSDatabase
+from decimal import Decimal, InvalidOperation
 
 class AddSupplierDialog(QDialog):
     def __init__(self, db: POSDatabase, parent=None):
@@ -570,3 +571,10 @@ Generated: {QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}
     def export_pdf(self):
         """Export EOD report as PDF"""
         QMessageBox.information(self, "Export", "PDF export functionality will be implemented with ReportLab.")
+        
+        # Generate the report text
+        report_text = f"""End of Day Report
+Generated: {QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}
+"""
+        
+        self.report_text.setText(report_text)

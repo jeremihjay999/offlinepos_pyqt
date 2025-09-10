@@ -342,21 +342,28 @@ class POSDatabase:
             return product_id
             
     def add_product_variant(self, product_id: int, name: str, price: float, 
-                          stock_quantity: int = 0, reorder_level: int = 5) -> int:
+                          stock_quantity: int = 0, reorder_level: int = 5, conn: sqlite3.Connection = None) -> int:
         """
         Add a variant to a product
         
         Args:
             product_id: ID of the product
             name: Variant name (e.g., "500g", "Red")
-            price: Price of the variant
+            price: Price of the variant (as a string to preserve precision)
             stock_quantity: Initial stock quantity
             reorder_level: Reorder level for this variant (default: 5)
+            conn: Optional database connection to use
             
         Returns:
             int: The ID of the newly created variant
         """
-        with self.get_connection() as conn:
+        if conn is None:
+            conn = self.get_connection()
+            close_conn = True
+        else:
+            close_conn = False
+
+        try:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -366,8 +373,12 @@ class POSDatabase:
                 (product_id, name, price, stock_quantity, reorder_level)
             )
             variant_id = cursor.lastrowid
-            conn.commit()
+            if close_conn:
+                conn.commit()
             return variant_id
+        finally:
+            if close_conn:
+                conn.close()
     
     
     
@@ -497,6 +508,74 @@ class POSDatabase:
             '''
             results = conn.execute(query).fetchall()
             return [dict(row) for row in results]
+
+    def get_variants_for_product(self, product_id: int, conn: sqlite3.Connection = None) -> List[Dict]:
+        """Get all variants for a product"""
+        if conn is None:
+            conn = self.get_connection()
+            close_conn = True
+        else:
+            close_conn = False
+        
+        try:
+            query = "SELECT * FROM variants WHERE product_id = ? ORDER BY name"
+            results = conn.execute(query, (product_id,)).fetchall()
+            return [dict(row) for row in results]
+        finally:
+            if close_conn:
+                conn.close()
+
+    def update_product(self, product_id: int, name: str, category_id: int = None,
+                     brand_id: int = None, supplier_id: int = None, barcode: str = None,
+                     variants: List[Dict] = []):
+        """
+        Update a product and its variants.
+        """
+        with self.get_connection() as conn:
+            # Update product details
+            conn.execute(
+                """
+                UPDATE products
+                SET name = ?, category_id = ?, brand_id = ?, supplier_id = ?, barcode = ?
+                WHERE id = ?
+                """,
+                (name, category_id, brand_id, supplier_id, barcode, product_id)
+            )
+
+            # Get existing variants
+            existing_variants = self.get_variants_for_product(product_id, conn=conn)
+            existing_variant_ids = {v['id'] for v in existing_variants}
+
+            # Update or add variants
+            for variant in variants:
+                variant_id = variant.get('id')
+                if variant_id in existing_variant_ids:
+                    # Update existing variant
+                    conn.execute(
+                        """
+                        UPDATE variants
+                        SET name = ?, price = ?, stock_quantity = ?, reorder_level = ?
+                        WHERE id = ?
+                        """,
+                        (variant['name'], variant['price'], variant['stock'], variant['reorder_level'], variant_id)
+                    )
+                    existing_variant_ids.remove(variant_id)
+                else:
+                    # Add new variant
+                    self.add_product_variant(
+                        product_id=product_id,
+                        name=variant['name'],
+                        price=variant['price'],
+                        stock_quantity=variant['stock'],
+                        reorder_level=variant['reorder_level'],
+                        conn=conn
+                    )
+
+            # Remove old variants
+            for variant_id in existing_variant_ids:
+                conn.execute("DELETE FROM variants WHERE id = ?", (variant_id,))
+
+            conn.commit()
     
     # Shift Management
     def start_shift(self, user_id: int, opening_cash: float) -> int:
