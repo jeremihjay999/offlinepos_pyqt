@@ -78,7 +78,6 @@ class POSDatabase:
                     name TEXT NOT NULL,
                     brand_id INTEGER,
                     category_id INTEGER,
-                    barcode TEXT UNIQUE,
                     supplier_id INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (brand_id) REFERENCES brands (id),
@@ -94,7 +93,8 @@ class POSDatabase:
                     product_id INTEGER NOT NULL,
                     name TEXT NOT NULL,  -- e.g., "1kg", "500g"
                     price DECIMAL(10,2) NOT NULL,
-                    barcode TEXT UNIQUE,
+                    purchase_price DECIMAL(10,2),
+                    barcode TEXT,
                     stock_quantity INTEGER DEFAULT 0,
                     reorder_level INTEGER DEFAULT 10,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -123,7 +123,9 @@ class POSDatabase:
                     total DECIMAL(10,2) NOT NULL,
                     tax_amount DECIMAL(10,2) DEFAULT 0,
                     discount_amount DECIMAL(10,2) DEFAULT 0,
-                    payment_method TEXT DEFAULT 'cash',
+                    payment_method TEXT CHECK(payment_method IN ('Cash', 'Card', 'Mpesa', 'Bank')) NOT NULL,
+                    transaction_reference TEXT,
+                    amount_paid REAL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (shift_id) REFERENCES shifts (id)
                 )
@@ -314,7 +316,7 @@ class POSDatabase:
     
     # Product Management
     def add_product(self, name: str, category_id: int = None, 
-                   brand_id: int = None, supplier_id: int = None, barcode: str = None) -> int:
+                   brand_id: int = None, supplier_id: int = None) -> int:
         """
         Add a new product to the database
         
@@ -323,7 +325,6 @@ class POSDatabase:
             category_id: ID of the category
             brand_id: ID of the brand
             supplier_id: ID of the supplier
-            barcode: Product barcode (optional)
             
         Returns:
             int: The ID of the newly created product
@@ -332,16 +333,16 @@ class POSDatabase:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO products (name, category_id, brand_id, supplier_id, barcode)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO products (name, category_id, brand_id, supplier_id)
+                VALUES (?, ?, ?, ?)
                 """,
-                (name, category_id, brand_id, supplier_id, barcode)
+                (name, category_id, brand_id, supplier_id)
             )
             product_id = cursor.lastrowid
             conn.commit()
             return product_id
             
-    def add_product_variant(self, product_id: int, name: str, price: float, 
+    def add_product_variant(self, product_id: int, name: str, price: float, purchase_price: float, barcode: str,
                           stock_quantity: int = 0, reorder_level: int = 5, conn: sqlite3.Connection = None) -> int:
         """
         Add a variant to a product
@@ -350,6 +351,8 @@ class POSDatabase:
             product_id: ID of the product
             name: Variant name (e.g., "500g", "Red")
             price: Price of the variant (as a string to preserve precision)
+            purchase_price: Purchase price of the variant
+            barcode: Barcode of the variant
             stock_quantity: Initial stock quantity
             reorder_level: Reorder level for this variant (default: 5)
             conn: Optional database connection to use
@@ -367,10 +370,10 @@ class POSDatabase:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO variants (product_id, name, price, stock_quantity, reorder_level)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO variants (product_id, name, price, purchase_price, barcode, stock_quantity, reorder_level)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (product_id, name, price, stock_quantity, reorder_level)
+                (product_id, name, price, purchase_price, barcode, stock_quantity, reorder_level)
             )
             variant_id = cursor.lastrowid
             if close_conn:
@@ -385,28 +388,10 @@ class POSDatabase:
     def get_products_with_variants(self) -> List[Dict]:
         """Get all products with their variants and supplier info"""
         with self.get_connection() as conn:
-            # Check if stock_quantity column exists
-            cursor = conn.cursor()
-            cursor.execute("PRAGMA table_info(variants)")
-            columns = [col[1] for col in cursor.fetchall()]
-            
-            if 'stock_quantity' not in columns:
-                print("Adding stock_quantity column to variants table...")
-                try:
-                    # To add a column, we need to commit and then reconnect
-                    cursor.execute("ALTER TABLE variants ADD COLUMN stock_quantity INTEGER DEFAULT 0")
-                    conn.commit()
-                    print("Successfully added stock_quantity column to variants table.")
-                except sqlite3.Error as e:
-                    print(f"Error adding column: {e}")
-                    conn.rollback()
-
-        # Re-establish connection to make sure the new column is recognized
-        with self.get_connection() as conn:
             query = '''
                 SELECT 
-                    p.id as product_id, p.name as product_name, p.barcode as product_barcode,
-                    v.id as variant_id, v.name as variant_name, v.price as price, v.barcode as variant_barcode, 
+                    p.id as product_id, p.name as product_name,
+                    v.id as variant_id, v.name as variant_name, v.price as price, v.purchase_price, v.barcode as variant_barcode, 
                     v.stock_quantity, v.reorder_level,
                     s.name as supplier_name, s.phone as supplier_phone, s.email as supplier_email,
                     b.name as brand_name,
@@ -420,6 +405,28 @@ class POSDatabase:
             '''
             results = conn.execute(query).fetchall()
             return [dict(row) for row in results]
+
+    def get_product_with_variants_by_id(self, product_id: int) -> Optional[Dict]:
+        """Get a single product with its variants and supplier info by product ID"""
+        with self.get_connection() as conn:
+            query = '''
+                SELECT 
+                    p.id as product_id, p.name as product_name,
+                    v.id as variant_id, v.name as variant_name, v.price as price, v.purchase_price, v.barcode as variant_barcode, 
+                    v.stock_quantity, v.reorder_level,
+                    s.id as supplier_id, s.name as supplier_name, s.phone as supplier_phone, s.email as supplier_email,
+                    b.id as brand_id, b.name as brand_name,
+                    c.id as category_id, c.name as category_name
+                FROM products p
+                LEFT JOIN variants v ON p.id = v.product_id
+                LEFT JOIN suppliers s ON p.supplier_id = s.id
+                LEFT JOIN brands b ON p.brand_id = b.id
+                LEFT JOIN categories c ON p.category_id = c.id
+                WHERE p.id = ?
+                ORDER BY p.name, v.name
+            '''
+            results = conn.execute(query, (product_id,)).fetchall()
+            return [dict(row) for row in results][0] if results else None
     
     def search_products(self, search_term: str) -> List[Dict]:
         """Search products by name, brand, or barcode"""
@@ -428,7 +435,7 @@ class POSDatabase:
             query = '''
                 SELECT 
                     p.id as product_id, p.name as product_name, 
-                    v.id as variant_id, v.name as variant_name, v.price, v.barcode, 
+                    v.id as variant_id, v.name as variant_name, v.price, v.purchase_price, v.barcode, 
                     v.stock_quantity, v.reorder_level,
                     b.name as brand_name,
                     c.name as category_name
@@ -436,10 +443,10 @@ class POSDatabase:
                 LEFT JOIN variants v ON p.id = v.product_id
                 LEFT JOIN brands b ON p.brand_id = b.id
                 LEFT JOIN categories c ON p.category_id = c.id
-                WHERE p.name LIKE ? OR b.name LIKE ? OR p.barcode LIKE ? OR v.barcode LIKE ?
+                WHERE p.name LIKE ? OR b.name LIKE ? OR v.barcode LIKE ?
                 ORDER BY p.name, v.name
             '''
-            results = conn.execute(query, (search_term, search_term, search_term, search_term)).fetchall()
+            results = conn.execute(query, (search_term, search_term, search_term)).fetchall()
             return [dict(row) for row in results]
     
     def find_by_barcode(self, barcode: str) -> Optional[Dict]:
@@ -449,7 +456,7 @@ class POSDatabase:
             query = '''
                 SELECT 
                     p.id as product_id, p.name as product_name, 
-                    v.id as variant_id, v.name as variant_name, v.price, v.stock_quantity,
+                    v.id as variant_id, v.name as variant_name, v.price, v.purchase_price, v.stock_quantity,
                     b.name as brand_name,
                     c.name as category_name
                 FROM products p
@@ -461,22 +468,7 @@ class POSDatabase:
             result = conn.execute(query, (barcode,)).fetchone()
             if result:
                 return dict(result)
-            
-            # Check product barcode
-            query = '''
-                SELECT 
-                    p.id as product_id, p.name as product_name, 
-                    v.id as variant_id, v.name as variant_name, v.price, v.stock_quantity,
-                    b.name as brand_name,
-                    c.name as category_name
-                FROM products p
-                JOIN variants v ON p.id = v.product_id
-                LEFT JOIN brands b ON p.brand_id = b.id
-                LEFT JOIN categories c ON p.category_id = c.id
-                WHERE p.barcode = ?
-            '''
-            result = conn.execute(query, (barcode,)).fetchone()
-            return dict(result) if result else None
+            return None
     
     def update_stock(self, variant_id: int, quantity_change: int):
         """Update stock quantity for a variant"""
@@ -526,7 +518,7 @@ class POSDatabase:
                 conn.close()
 
     def update_product(self, product_id: int, name: str, category_id: int = None,
-                     brand_id: int = None, supplier_id: int = None, barcode: str = None,
+                     brand_id: int = None, supplier_id: int = None,
                      variants: List[Dict] = []):
         """
         Update a product and its variants.
@@ -536,10 +528,10 @@ class POSDatabase:
             conn.execute(
                 """
                 UPDATE products
-                SET name = ?, category_id = ?, brand_id = ?, supplier_id = ?, barcode = ?
+                SET name = ?, category_id = ?, brand_id = ?, supplier_id = ?
                 WHERE id = ?
                 """,
-                (name, category_id, brand_id, supplier_id, barcode, product_id)
+                (name, category_id, brand_id, supplier_id, product_id)
             )
 
             # Get existing variants
@@ -554,10 +546,10 @@ class POSDatabase:
                     conn.execute(
                         """
                         UPDATE variants
-                        SET name = ?, price = ?, stock_quantity = ?, reorder_level = ?
+                        SET name = ?, price = ?, purchase_price = ?, barcode = ?, stock_quantity = ?, reorder_level = ?
                         WHERE id = ?
                         """,
-                        (variant['name'], variant['price'], variant['stock'], variant['reorder_level'], variant_id)
+                        (variant['name'], variant['price'], variant['purchase_price'], variant['barcode'], variant['stock'], variant['reorder_level'], variant_id)
                     )
                     existing_variant_ids.remove(variant_id)
                 else:
@@ -566,6 +558,8 @@ class POSDatabase:
                         product_id=product_id,
                         name=variant['name'],
                         price=variant['price'],
+                        purchase_price=variant['purchase_price'],
+                        barcode=variant['barcode'],
                         stock_quantity=variant['stock'],
                         reorder_level=variant['reorder_level'],
                         conn=conn
@@ -608,12 +602,13 @@ class POSDatabase:
     
     # Sales Management
     def create_sale(self, shift_id: int, total: float, tax_amount: float = 0, 
-                   discount_amount: float = 0, payment_method: str = "cash") -> int:
+                   discount_amount: float = 0, payment_method: str = "Cash", 
+                   transaction_reference: str = None, amount_paid: float = None) -> int:
         """Create sale and return sale ID"""
         with self.get_connection() as conn:
             cursor = conn.execute(
-                "INSERT INTO sales (shift_id, total, tax_amount, discount_amount, payment_method) VALUES (?, ?, ?, ?, ?)",
-                (shift_id, total, tax_amount, discount_amount, payment_method)
+                "INSERT INTO sales (shift_id, total, tax_amount, discount_amount, payment_method, transaction_reference, amount_paid) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (shift_id, total, tax_amount, discount_amount, payment_method, transaction_reference, amount_paid)
             )
             conn.commit()
             return cursor.lastrowid
