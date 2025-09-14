@@ -396,6 +396,7 @@ class ReceiptPrintDialog(QDialog):
         settings = self.db.get_all_settings()
         sale = self.sale_data['sale']
         items = self.sale_data['items']
+        payments = self.sale_data['payments']
         
         receipt_text = f"""
 {settings.get('store_name', 'POS System').center(32)}
@@ -426,8 +427,27 @@ Cashier: [Current User]
 {'TOTAL:':<25} ${sale['total']:<6.2f}
 {'=' * 32}
 
-Payment Method: {sale['payment_method'].title()}
+Payments:
+"""
+        
+        total_paid = 0
+        for payment in payments:
+            total_paid += payment['amount']
+            payment_line = f"    {payment['method'].title()}: ${payment['amount']:.2f}"
+            if payment.get('transaction_reference'):
+                payment_line += f" (Ref: {payment['transaction_reference']})"
+            receipt_text += payment_line + "\n"
 
+        receipt_text += f"\nTotal Paid: ${total_paid:.2f}\n"
+
+        if any(p['method'] == 'Cash' for p in payments):
+            cash_paid = sum(p['amount'] for p in payments if p['method'] == 'Cash')
+            change = cash_paid - sale['total']
+            if change < 0:
+                change = 0
+            receipt_text += f"Change: ${change:.2f}\n"
+
+        receipt_text += f"""
 {settings.get('receipt_footer', 'Thank you!').center(32)}
 
 {'-' * 32}

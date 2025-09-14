@@ -123,11 +123,20 @@ class POSDatabase:
                     total DECIMAL(10,2) NOT NULL,
                     tax_amount DECIMAL(10,2) DEFAULT 0,
                     discount_amount DECIMAL(10,2) DEFAULT 0,
-                    payment_method TEXT CHECK(payment_method IN ('Cash', 'Card', 'Mpesa', 'Bank')) NOT NULL,
-                    transaction_reference TEXT,
-                    amount_paid REAL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (shift_id) REFERENCES shifts (id)
+                )
+            ''')
+
+            # Sale Payments table
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS sale_payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sale_id INTEGER NOT NULL,
+                    method TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    transaction_reference TEXT,
+                    FOREIGN KEY (sale_id) REFERENCES sales (id)
                 )
             ''')
             
@@ -136,8 +145,8 @@ class POSDatabase:
                 CREATE TABLE IF NOT EXISTS sale_items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     sale_id INTEGER NOT NULL,
-                    product_id INTEGER NOT NULL,
-                    variant_id INTEGER NOT NULL,
+                    product_id INTEGER,
+                    variant_id INTEGER,
                     qty INTEGER NOT NULL,
                     price DECIMAL(10,2) NOT NULL,
                     subtotal DECIMAL(10,2) NOT NULL,
@@ -457,6 +466,7 @@ class POSDatabase:
                 SELECT 
                     p.id as product_id, p.name as product_name, 
                     v.id as variant_id, v.name as variant_name, v.price, v.purchase_price, v.stock_quantity,
+                    v.id as id,
                     b.name as brand_name,
                     c.name as category_name
                 FROM products p
@@ -602,16 +612,25 @@ class POSDatabase:
     
     # Sales Management
     def create_sale(self, shift_id: int, total: float, tax_amount: float = 0, 
-                   discount_amount: float = 0, payment_method: str = "Cash", 
-                   transaction_reference: str = None, amount_paid: float = None) -> int:
+                   discount_amount: float = 0) -> int:
         """Create sale and return sale ID"""
         with self.get_connection() as conn:
             cursor = conn.execute(
-                "INSERT INTO sales (shift_id, total, tax_amount, discount_amount, payment_method, transaction_reference, amount_paid) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (shift_id, total, tax_amount, discount_amount, payment_method, transaction_reference, amount_paid)
+                "INSERT INTO sales (shift_id, total, tax_amount, discount_amount) VALUES (?, ?, ?, ?)",
+                (shift_id, total, tax_amount, discount_amount)
             )
             conn.commit()
             return cursor.lastrowid
+
+    def add_sale_payments(self, sale_id: int, payments: List[Dict]):
+        """Add payment records for a sale"""
+        with self.get_connection() as conn:
+            for payment in payments:
+                conn.execute(
+                    "INSERT INTO sale_payments (sale_id, method, amount, transaction_reference) VALUES (?, ?, ?, ?)",
+                    (sale_id, payment['method'], float(payment['amount']), payment.get('reference'))
+                )
+            conn.commit()
     
     def add_sale_item(self, sale_id: int, product_id: int, variant_id: int, 
                      qty: int, price: float, subtotal: float):
@@ -622,14 +641,15 @@ class POSDatabase:
                 (sale_id, product_id, variant_id, qty, price, subtotal)
             )
             # Update stock
-            conn.execute(
-                "UPDATE variants SET stock_quantity = stock_quantity - ? WHERE id = ?",
-                (qty, variant_id)
-            )
+            if variant_id:
+                conn.execute(
+                    "UPDATE variants SET stock_quantity = stock_quantity - ? WHERE id = ?",
+                    (qty, variant_id)
+                )
             conn.commit()
     
     def get_sale_with_items(self, sale_id: int) -> Dict:
-        """Get sale with all items"""
+        """Get sale with all items and payments"""
         with self.get_connection() as conn:
             # Get sale info
             sale = conn.execute("SELECT * FROM sales WHERE id = ?", (sale_id,)).fetchone()
@@ -648,10 +668,15 @@ class POSDatabase:
                 WHERE si.sale_id = ?
             '''
             items = conn.execute(items_query, (sale_id,)).fetchall()
+
+            # Get sale payments
+            payments_query = "SELECT * FROM sale_payments WHERE sale_id = ?"
+            payments = conn.execute(payments_query, (sale_id,)).fetchall()
             
             return {
                 'sale': dict(sale),
-                'items': [dict(item) for item in items]
+                'items': [dict(item) for item in items],
+                'payments': [dict(payment) for payment in payments]
             }
     
     # Reporting
@@ -669,8 +694,18 @@ class POSDatabase:
                 params.append(end_date)
             
             # Total sales
-            query = f"SELECT COUNT(*) as total_sales, SUM(total) as total_revenue, SUM(tax_amount) as total_tax, SUM(discount_amount) as total_discounts FROM sales s{where_clause}"
+            query = f"SELECT COUNT(DISTINCT s.id) as total_sales, SUM(sp.amount) as total_revenue, SUM(s.tax_amount) as total_tax, SUM(s.discount_amount) as total_discounts FROM sales s JOIN sale_payments sp ON s.id = sp.sale_id{where_clause}"
             summary = conn.execute(query, params).fetchone()
+
+            # Revenue by payment method
+            payment_method_query = f'''
+                SELECT method, SUM(amount) as total
+                FROM sale_payments sp
+                JOIN sales s ON sp.sale_id = s.id
+                {where_clause}
+                GROUP BY method
+            '''
+            payment_methods = conn.execute(payment_method_query, params).fetchall()
             
             # Top products
             top_products_query = f'''
@@ -690,5 +725,93 @@ class POSDatabase:
             
             return {
                 'summary': dict(summary),
+                'payment_methods': [dict(pm) for pm in payment_methods],
                 'top_products': [dict(product) for product in top_products]
             }
+
+    def get_total_sales(self, start_date: str, end_date: str) -> float:
+        with self.get_connection() as conn:
+            query = "SELECT SUM(amount) FROM sale_payments sp JOIN sales s ON sp.sale_id = s.id WHERE DATE(s.created_at) BETWEEN ? AND ?"
+            result = conn.execute(query, (start_date, end_date)).fetchone()
+            return result[0] or 0
+
+    def get_number_of_sales(self, start_date: str, end_date: str) -> int:
+        with self.get_connection() as conn:
+            query = "SELECT COUNT(DISTINCT sale_id) FROM sale_payments sp JOIN sales s ON sp.sale_id = s.id WHERE DATE(s.created_at) BETWEEN ? AND ?"
+            result = conn.execute(query, (start_date, end_date)).fetchone()
+            return result[0] or 0
+
+    def get_items_sold(self, start_date: str, end_date: str) -> int:
+        with self.get_connection() as conn:
+            query = "SELECT SUM(qty) FROM sale_items si JOIN sales s ON si.sale_id = s.id WHERE DATE(s.created_at) BETWEEN ? AND ?"
+            result = conn.execute(query, (start_date, end_date)).fetchone()
+            return result[0] or 0
+
+    def get_profit(self, start_date: str, end_date: str) -> float:
+        with self.get_connection() as conn:
+            query = """
+                SELECT SUM(si.subtotal - (v.purchase_price * si.qty))
+                FROM sale_items si
+                JOIN variants v ON si.variant_id = v.id
+                JOIN sales s ON si.sale_id = s.id
+                WHERE v.purchase_price IS NOT NULL AND DATE(s.created_at) BETWEEN ? AND ?
+            """
+            result = conn.execute(query, (start_date, end_date)).fetchone()
+            return result[0] or 0
+
+    def get_sales_by_payment_method(self, start_date: str, end_date: str) -> List[Dict]:
+        with self.get_connection() as conn:
+            query = """
+                SELECT method, SUM(amount) as total
+                FROM sale_payments sp
+                JOIN sales s ON sp.sale_id = s.id
+                WHERE DATE(s.created_at) BETWEEN ? AND ?
+                GROUP BY method
+            """
+            results = conn.execute(query, (start_date, end_date)).fetchall()
+            return [dict(row) for row in results]
+
+    def get_top_products(self, start_date: str, end_date: str) -> List[Dict]:
+        with self.get_connection() as conn:
+            query = """
+                SELECT
+                    p.name as product_name,
+                    v.name as variant_name,
+                    SUM(si.qty) as total_qty,
+                    SUM(si.subtotal) as total_revenue,
+                    SUM(si.subtotal - (v.purchase_price * si.qty)) as total_profit
+                FROM sale_items si
+                JOIN products p ON si.product_id = p.id
+                JOIN variants v ON si.variant_id = v.id
+                JOIN sales s ON si.sale_id = s.id
+                WHERE v.purchase_price IS NOT NULL AND DATE(s.created_at) BETWEEN ? AND ?
+                GROUP BY si.product_id, si.variant_id
+                ORDER BY total_qty DESC
+                LIMIT 10
+            """
+            results = conn.execute(query, (start_date, end_date)).fetchall()
+            return [dict(row) for row in results]
+
+    def get_detailed_sales(self, start_date: str, end_date: str) -> List[Dict]:
+        with self.get_connection() as conn:
+            query = """
+                SELECT
+                    s.id as sale_id,
+                    s.created_at as sale_date,
+                    s.total as total_amount,
+                    GROUP_CONCAT(sp.method || ': ' || sp.amount) as payments,
+                    'Completed' as status
+                FROM sales s
+                JOIN sale_payments sp ON s.id = sp.sale_id
+                WHERE DATE(s.created_at) BETWEEN ? AND ?
+                GROUP BY s.id
+                ORDER BY s.created_at DESC
+            """
+            results = conn.execute(query, (start_date, end_date)).fetchall()
+            return [dict(row) for row in results]
+
+    def get_items_sold_for_sale(self, sale_id: int) -> int:
+        with self.get_connection() as conn:
+            query = "SELECT SUM(qty) FROM sale_items WHERE sale_id = ?"
+            result = conn.execute(query, (sale_id,)).fetchone()
+            return result[0] or 0

@@ -6,6 +6,9 @@ from PyQt5.QtCore import *
 from PyQt5.QtGui import *
 from db import POSDatabase
 from config import TAX_INCLUSIVE
+from payment_dialog import SplitPaymentDialog
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 
 class LoginDialog(QDialog):
     def __init__(self, db: POSDatabase):
@@ -442,7 +445,13 @@ class POSMainWindow(QMainWindow):
         payment_layout.addWidget(self.cash_payment_btn, 0, 0)
         payment_layout.addWidget(self.card_payment_btn, 0, 1)
         payment_layout.addWidget(self.mpesa_payment_btn, 0, 2)
-        payment_layout.addWidget(self.custom_item_btn, 1, 0, 1, 2)
+
+        self.split_payment_btn = QPushButton("Split Payment")
+        self.split_payment_btn.clicked.connect(self.process_split_payment)
+        self.split_payment_btn.setStyleSheet("background-color: #6c757d;")
+        payment_layout.addWidget(self.split_payment_btn, 1, 0)
+
+        payment_layout.addWidget(self.custom_item_btn, 1, 1)
         payment_layout.addWidget(self.clear_cart_btn, 1, 2)
 
         right_panel.addLayout(payment_layout)
@@ -501,45 +510,205 @@ class POSMainWindow(QMainWindow):
         
         self.refresh_products_table()
         
+    def create_summary_card(self, title, value, icon_path=None):
+        card = QFrame()
+        card.setFrameShape(QFrame.StyledPanel)
+        card.setFrameShadow(QFrame.Raised)
+        card.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 10px;
+                padding: 15px;
+            }
+        """)
+        
+        layout = QVBoxLayout()
+        
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size: 14px; color: #888;")
+        
+        value_label = QLabel(value)
+        value_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        
+        layout.addWidget(title_label)
+        layout.addWidget(value_label)
+        
+        card.setLayout(layout)
+        return card
+
     def create_reports_tab(self):
         """Create reports tab"""
         reports_widget = QWidget()
         layout = QVBoxLayout()
-        
-        # Date filters
-        filters_layout = QHBoxLayout()
-        
-        filters_layout.addWidget(QLabel("From:"))
+        reports_widget.setLayout(layout)
+
+        # Header
+        header_layout = QHBoxLayout()
+        store_name = self.db.get_setting('store_name')
+        header_label = QLabel(f"{store_name} Reports Dashboard")
+        header_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        header_layout.addWidget(header_label)
+        header_layout.addStretch()
+        layout.addLayout(header_layout)
+
+        # Date Range Selector
+        date_range_layout = QHBoxLayout()
+        date_range_layout.addWidget(QLabel("Date Range:"))
+        self.today_rb = QRadioButton("Today")
+        self.week_rb = QRadioButton("This Week")
+        self.custom_rb = QRadioButton("Custom")
         self.from_date = QDateEdit()
         self.from_date.setDate(QDate.currentDate().addDays(-30))
         self.from_date.setCalendarPopup(True)
-        filters_layout.addWidget(self.from_date)
-        
-        filters_layout.addWidget(QLabel("To:"))
         self.to_date = QDateEdit()
         self.to_date.setDate(QDate.currentDate())
         self.to_date.setCalendarPopup(True)
-        filters_layout.addWidget(self.to_date)
         
-        generate_report_btn = QPushButton("Generate Report")
-        generate_report_btn.clicked.connect(self.generate_report)
-        filters_layout.addWidget(generate_report_btn)
+        date_range_layout.addWidget(self.today_rb)
+        date_range_layout.addWidget(self.week_rb)
+        date_range_layout.addWidget(self.custom_rb)
+        date_range_layout.addWidget(self.from_date)
+        date_range_layout.addWidget(QLabel("To:"))
+        date_range_layout.addWidget(self.to_date)
+        date_range_layout.addStretch()
+        layout.addLayout(date_range_layout)
+
+        # Summary Cards
+        summary_layout = QHBoxLayout()
+        self.total_sales_card = self.create_summary_card("Total Sales", "$0.00")
+        self.num_sales_card = self.create_summary_card("Number of Sales", "0")
+        self.items_sold_card = self.create_summary_card("Items Sold", "0")
+        self.profit_card = self.create_summary_card("Profit", "$0.00")
+        summary_layout.addWidget(self.total_sales_card)
+        summary_layout.addWidget(self.num_sales_card)
+        summary_layout.addWidget(self.items_sold_card)
+        summary_layout.addWidget(self.profit_card)
+        layout.addLayout(summary_layout)
+
+        # Charts
+        charts_layout = QHBoxLayout()
         
-        export_csv_btn = QPushButton("Export CSV")
-        export_csv_btn.clicked.connect(self.export_report_csv)
-        filters_layout.addWidget(export_csv_btn)
-        
-        filters_layout.addStretch()
-        
-        layout.addLayout(filters_layout)
-        
-        # Report display
-        self.report_text = QTextEdit()
-        self.report_text.setReadOnly(True)
-        layout.addWidget(self.report_text)
-        
-        reports_widget.setLayout(layout)
+        # Payment method chart
+        self.payment_chart_widget = QWidget()
+        self.payment_chart_layout = QVBoxLayout()
+        self.payment_chart_widget.setLayout(self.payment_chart_layout)
+        charts_layout.addWidget(self.payment_chart_widget)
+
+        # Top products chart
+        self.top_products_chart_widget = QWidget()
+        self.top_products_chart_layout = QVBoxLayout()
+        self.top_products_chart_widget.setLayout(self.top_products_chart_layout)
+        charts_layout.addWidget(self.top_products_chart_widget)
+
+        layout.addLayout(charts_layout)
+
+        # Detailed Sales Table
+        self.sales_table = QTableWidget()
+        self.sales_table.setColumnCount(7)
+        self.sales_table.setHorizontalHeaderLabels(["Date", "Sale ID", "Customer", "Items", "Total", "Payment(s)", "Status"])
+        layout.addWidget(self.sales_table)
+
+        # Footer
+        footer_layout = QHBoxLayout()
+        download_btn = QPushButton("Download Report")
+        print_btn = QPushButton("Print Report")
+        footer_layout.addStretch()
+        footer_layout.addWidget(download_btn)
+        footer_layout.addWidget(print_btn)
+        layout.addLayout(footer_layout)
+
         self.tabs.addTab(reports_widget, "Reports")
+
+        # Connect signals
+        self.today_rb.toggled.connect(self.update_reports)
+        self.week_rb.toggled.connect(self.update_reports)
+        self.custom_rb.toggled.connect(self.update_reports)
+        self.from_date.dateChanged.connect(self.update_reports)
+        self.to_date.dateChanged.connect(self.update_reports)
+
+        self.update_reports()
+
+    def update_reports(self):
+        start_date = self.from_date.date().toString("yyyy-MM-dd")
+        end_date = self.to_date.date().toString("yyyy-MM-dd")
+
+        if self.today_rb.isChecked():
+            start_date = QDate.currentDate().toString("yyyy-MM-dd")
+            end_date = QDate.currentDate().toString("yyyy-MM-dd")
+        elif self.week_rb.isChecked():
+            start_date = QDate.currentDate().addDays(-7).toString("yyyy-MM-dd")
+            end_date = QDate.currentDate().toString("yyyy-MM-dd")
+
+        # Update summary cards
+        total_sales = self.db.get_total_sales(start_date, end_date)
+        num_sales = self.db.get_number_of_sales(start_date, end_date)
+        items_sold = self.db.get_items_sold(start_date, end_date)
+        profit = self.db.get_profit(start_date, end_date)
+        self.total_sales_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(f"${total_sales:.2f}")
+        self.num_sales_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(str(num_sales))
+        self.items_sold_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(str(items_sold))
+        self.profit_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(f"${profit:.2f}")
+
+        # Update payment method chart
+        payment_data = self.db.get_sales_by_payment_method(start_date, end_date)
+        self.update_payment_chart(payment_data)
+
+        # Update top products chart
+        top_products_data = self.db.get_top_products(start_date, end_date)
+        self.update_top_products_chart(top_products_data)
+
+        # Update detailed sales table
+        detailed_sales = self.db.get_detailed_sales(start_date, end_date)
+        self.sales_table.setRowCount(len(detailed_sales))
+        for i, sale in enumerate(detailed_sales):
+            self.sales_table.setItem(i, 0, QTableWidgetItem(sale['sale_date']))
+            self.sales_table.setItem(i, 1, QTableWidgetItem(str(sale['sale_id'])))
+            self.sales_table.setItem(i, 2, QTableWidgetItem("N/A")) # Customer name is not available
+            self.sales_table.setItem(i, 3, QTableWidgetItem(str(self.db.get_items_sold_for_sale(sale['sale_id'])))) # Need a new db method for this
+            self.sales_table.setItem(i, 4, QTableWidgetItem(f"${sale['total_amount']:.2f}"))
+            self.sales_table.setItem(i, 5, QTableWidgetItem(sale['payments']))
+            self.sales_table.setItem(i, 6, QTableWidgetItem(sale['status']))
+
+    def update_payment_chart(self, data):
+        for i in reversed(range(self.payment_chart_layout.count())): 
+            self.payment_chart_layout.itemAt(i).widget().setParent(None)
+
+        if not data:
+            self.payment_chart_layout.addWidget(QLabel("No payment data for this period."))
+            return
+
+        fig = Figure(figsize=(5, 4), dpi=100)
+        canvas = FigureCanvas(fig)
+        self.payment_chart_layout.addWidget(canvas)
+        ax = fig.add_subplot(111)
+
+        labels = [d['method'] for d in data]
+        sizes = [d['total'] for d in data]
+        
+        ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
+        ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
+        ax.set_title("Sales by Payment Method")
+
+    def update_top_products_chart(self, data):
+        for i in reversed(range(self.top_products_chart_layout.count())):
+            self.top_products_chart_layout.itemAt(i).widget().setParent(None)
+
+        if not data:
+            self.top_products_chart_layout.addWidget(QLabel("No product data for this period."))
+            return
+            
+        fig = Figure(figsize=(5, 4), dpi=100)
+        canvas = FigureCanvas(fig)
+        self.top_products_chart_layout.addWidget(canvas)
+        ax = fig.add_subplot(111)
+
+        product_names = [f"{d['product_name']} ({d['variant_name']})" for d in data]
+        quantities = [d['total_qty'] for d in data]
+
+        ax.bar(product_names, quantities)
+        ax.set_title("Top Selling Products")
+        ax.set_ylabel("Quantity Sold")
+        fig.autofmt_xdate()
         
     def create_settings_tab(self):
         """Create settings tab (admin only)"""
@@ -891,9 +1060,8 @@ class POSMainWindow(QMainWindow):
             tax_amount = subtotal * tax_rate
             total = subtotal + tax_amount
 
-        amount_paid = total
+        payments = []
         change = 0
-        transaction_reference = None
 
         if method == "Cash":
             # Cash payment dialog
@@ -909,19 +1077,22 @@ class POSMainWindow(QMainWindow):
                 QMessageBox.warning(self, "Insufficient Cash", "Cash received is less than total amount!")
                 return
             
-            amount_paid = cash_received
+            payments.append({'method': 'Cash', 'amount': total, 'reference': None})
             change = cash_received - total
         else:
             # For Card and M-Pesa, get an optional transaction reference
             reference, ok = QInputDialog.getText(self, f"{method} Payment", f"Enter {method} transaction reference (optional):")
             if not ok:
                 return
-            transaction_reference = reference
+            payments.append({'method': method, 'amount': total, 'reference': reference})
 
         # Process sale
         sale_id = self.db.create_sale(
-            self.current_shift['id'], total, tax_amount, 0, method, transaction_reference, amount_paid
+            self.current_shift['id'], total, tax_amount, 0
         )
+        
+        # Add sale payments
+        self.db.add_sale_payments(sale_id, payments)
         
         # Add sale items
         for item in self.cart_items:
@@ -940,13 +1111,59 @@ class POSMainWindow(QMainWindow):
             f"Payment successful!\nChange: {self.db.get_setting('currency_symbol')}{change:.2f}\n\nReceipt will be printed."
         )
         
-        # Print receipt (TODO: Implement)
+        # Print receipt
         self.print_receipt(sale_id)
         
         # Clear cart
         self.cart_items.clear()
         self.update_cart_display()
         self.load_products()  # Refresh stock
+
+    def process_split_payment(self):
+        if not self.cart_items:
+            QMessageBox.warning(self, "Empty Cart", "Please add items to cart first!")
+            return
+
+        subtotal = sum(item['total'] for item in self.cart_items)
+        tax_rate = float(self.db.get_setting('tax_rate') or '0') / 100
+        
+        if TAX_INCLUSIVE:
+            total = subtotal
+            tax_amount = total - (total / (1 + tax_rate))
+        else:
+            tax_amount = subtotal * tax_rate
+            total = subtotal + tax_amount
+
+        dialog = SplitPaymentDialog(total, self)
+        if dialog.exec_() == QDialog.Accepted:
+            payments = dialog.payments
+            
+            # Process sale
+            sale_id = self.db.create_sale(
+                self.current_shift['id'], total, tax_amount, 0
+            )
+            
+            # Add sale payments
+            self.db.add_sale_payments(sale_id, payments)
+
+            # Add sale items
+            for item in self.cart_items:
+                base_price = item['price']
+                if TAX_INCLUSIVE:
+                    base_price = item['price'] / (1 + tax_rate)
+                
+                self.db.add_sale_item(
+                    sale_id, item.get('product_id'), item.get('variant_id'),
+                    item['qty'], base_price, item['qty'] * base_price
+                )
+
+            QMessageBox.information(self, "Payment Complete", "Payment successful!")
+            
+            self.print_receipt(sale_id)
+            
+            self.cart_items.clear()
+            self.update_cart_display()
+            self.load_products()
             
     def print_receipt(self, sale_id):
         """Print receipt for sale"""
@@ -1051,6 +1268,14 @@ Total Sales: {summary['summary']['total_sales'] or 0}
 Total Revenue: ${summary['summary']['total_revenue'] or 0:.2f}
 Total Tax: ${summary['summary']['total_tax'] or 0:.2f}
 Total Discounts: ${summary['summary']['total_discounts'] or 0:.2f}
+
+REVENUE BY PAYMENT METHOD
+-------------------------
+"""
+        for pm in summary['payment_methods']:
+            report_text += f"{pm['method']}: ${pm['total']:.2f}\n"
+
+        report_text += """
 
 TOP PRODUCTS
 ------------
