@@ -1,6 +1,7 @@
 import sqlite3
 import hashlib
 import os
+import json
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
@@ -25,6 +26,7 @@ class POSDatabase:
                     username TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
                     role TEXT NOT NULL CHECK(role IN ('admin', 'cashier')),
+                    permissions TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -167,9 +169,10 @@ class POSDatabase:
             if not admin:
                 # Create default admin
                 password_hash = hashlib.sha256("admin123".encode()).hexdigest()
+                permissions = '["Can access sales tab", "Can access products tab", "Can access reports tab", "Can access settings tab"]'
                 conn.execute(
-                    "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-                    ("admin", password_hash, "admin")
+                    "INSERT INTO users (username, password_hash, role, permissions) VALUES (?, ?, ?, ?)",
+                    ("admin", password_hash, "admin", permissions)
                 )
             
             # Default settings
@@ -199,16 +202,24 @@ class POSDatabase:
                 "SELECT * FROM users WHERE username = ? AND password_hash = ?",
                 (username, password_hash)
             ).fetchone()
-            return dict(user) if user else None
+            if user:
+                user_data = dict(user)
+                if user_data.get('permissions'):
+                    user_data['permissions'] = json.loads(user_data['permissions'])
+                else:
+                    user_data['permissions'] = []
+                return user_data
+            return None
     
-    def create_user(self, username: str, password: str, role: str) -> bool:
+    def create_user(self, username: str, password: str, role: str, permissions: List[str] = []) -> bool:
         """Create new user"""
         try:
             password_hash = hashlib.sha256(password.encode()).hexdigest()
+            permissions_json = json.dumps(permissions)
             with self.get_connection() as conn:
                 conn.execute(
-                    "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
-                    (username, password_hash, role)
+                    "INSERT INTO users (username, password_hash, role, permissions) VALUES (?, ?, ?, ?)",
+                    (username, password_hash, role, permissions_json)
                 )
                 conn.commit()
                 return True
@@ -218,8 +229,62 @@ class POSDatabase:
     def get_all_users(self) -> List[Dict]:
         """Get all users"""
         with self.get_connection() as conn:
-            users = conn.execute("SELECT id, username, role, created_at FROM users").fetchall()
+            users = conn.execute("SELECT id, username, role, created_at, permissions FROM users").fetchall()
             return [dict(user) for user in users]
+
+    def get_user_by_username(self, username: str) -> Optional[Dict]:
+        """Get user by username"""
+        with self.get_connection() as conn:
+            user = conn.execute(
+                "SELECT * FROM users WHERE username = ?",
+                (username,)
+            ).fetchone()
+            if user:
+                user_data = dict(user)
+                if user_data.get('permissions'):
+                    user_data['permissions'] = json.loads(user_data['permissions'])
+                else:
+                    user_data['permissions'] = []
+                return user_data
+            return None
+
+    def update_user(self, user_id: int, username: str, role: str, permissions: List[str]) -> bool:
+        """Update user information"""
+        try:
+            permissions_json = json.dumps(permissions)
+            with self.get_connection() as conn:
+                conn.execute(
+                    "UPDATE users SET username = ?, role = ?, permissions = ? WHERE id = ?",
+                    (username, role, permissions_json, user_id)
+                )
+                conn.commit()
+                return True
+        except sqlite3.Error:
+            return False
+
+    def reset_password(self, user_id: int, password: str) -> bool:
+        """Reset user password"""
+        try:
+            password_hash = hashlib.sha256(password.encode()).hexdigest()
+            with self.get_connection() as conn:
+                conn.execute(
+                    "UPDATE users SET password_hash = ? WHERE id = ?",
+                    (password_hash, user_id)
+                )
+                conn.commit()
+                return True
+        except sqlite3.Error:
+            return False
+
+    def delete_user(self, user_id: int) -> bool:
+        """Delete a user"""
+        try:
+            with self.get_connection() as conn:
+                conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+                conn.commit()
+                return True
+        except sqlite3.Error:
+            return False
     
     # Settings Management
     def get_setting(self, key: str) -> str:
@@ -775,6 +840,8 @@ class POSDatabase:
         with self.get_connection() as conn:
             query = """
                 SELECT
+                    p.id as product_id,
+                    v.id as variant_id,
                     p.name as product_name,
                     v.name as variant_name,
                     SUM(si.qty) as total_qty,
@@ -788,6 +855,88 @@ class POSDatabase:
                 GROUP BY si.product_id, si.variant_id
                 ORDER BY total_qty DESC
                 LIMIT 10
+            """
+            results = conn.execute(query, (start_date, end_date)).fetchall()
+            return [dict(row) for row in results]
+
+    def get_detailed_transactions(self, start_date: str, end_date: str) -> List[Dict]:
+        """Get detailed transactions for a given date range."""
+        with self.get_connection() as conn:
+            query = """
+                SELECT
+                    s.id as sale_id,
+                    s.created_at as sale_date,
+                    u.username as cashier,
+                    GROUP_CONCAT(sp.method || ': ' || sp.amount) as payments,
+                    GROUP_CONCAT(CASE WHEN sp.method != 'Cash' THEN sp.transaction_reference ELSE 'N/A' END) as transaction_codes,
+                    s.total as total_amount,
+                    'Completed' as status
+                FROM sales s
+                JOIN shifts sh ON s.shift_id = sh.id
+                JOIN users u ON sh.user_id = u.id
+                JOIN sale_payments sp ON s.id = sp.sale_id
+                WHERE DATE(s.created_at) BETWEEN ? AND ?
+                GROUP BY s.id
+                ORDER BY s.created_at DESC
+            """
+            results = conn.execute(query, (start_date, end_date)).fetchall()
+            return [dict(row) for row in results]
+
+    def get_shift_summary(self, start_date: str, end_date: str) -> List[Dict]:
+        """Get shift summary for a given date range."""
+        with self.get_connection() as conn:
+            query = """
+                SELECT
+                    u.username as cashier,
+                    sh.opening_cash,
+                    sh.closing_cash,
+                    (SELECT SUM(amount) FROM sale_payments WHERE sale_id IN (SELECT id FROM sales WHERE shift_id = sh.id) AND method = 'Cash') as expected_cash_sales
+                FROM shifts sh
+                JOIN users u ON sh.user_id = u.id
+                WHERE DATE(sh.start_time) BETWEEN ? AND ?
+                ORDER BY sh.start_time DESC
+            """
+            results = conn.execute(query, (start_date, end_date)).fetchall()
+            return [dict(row) for row in results]
+
+    def get_sales_for_product(self, product_id: int, variant_id: int, start_date: str, end_date: str) -> List[Dict]:
+        """Get all sales for a specific product variant in a date range."""
+        with self.get_connection() as conn:
+            query = """
+                SELECT
+                    s.created_at as sale_date,
+                    si.qty,
+                    si.price,
+                    si.subtotal
+                FROM sale_items si
+                JOIN sales s ON si.sale_id = s.id
+                WHERE si.product_id = ? AND si.variant_id = ? AND DATE(s.created_at) BETWEEN ? AND ?
+                ORDER BY s.created_at DESC
+            """
+            results = conn.execute(query, (product_id, variant_id, start_date, end_date)).fetchall()
+            return [dict(row) for row in results]
+
+    def get_sold_items(self, start_date: str, end_date: str) -> List[Dict]:
+        """Get all sold items in a date range."""
+        with self.get_connection() as conn:
+            query = """
+                SELECT
+                    s.created_at as sale_date,
+                    s.id as sale_id,
+                    u.username as cashier,
+                    p.name as product_name,
+                    v.name as variant_name,
+                    si.qty,
+                    si.price,
+                    si.subtotal
+                FROM sale_items si
+                JOIN sales s ON si.sale_id = s.id
+                JOIN shifts sh ON s.shift_id = sh.id
+                JOIN users u ON sh.user_id = u.id
+                JOIN products p ON si.product_id = p.id
+                JOIN variants v ON si.variant_id = v.id
+                WHERE DATE(s.created_at) BETWEEN ? AND ?
+                ORDER BY s.id DESC, p.name
             """
             results = conn.execute(query, (start_date, end_date)).fetchall()
             return [dict(row) for row in results]

@@ -1,5 +1,8 @@
-PyQt5==5.15.9
-matplotlib==3.8.0
+PySide6==6.7.2
+matplotlib==3.9.2
 reportlab==4.0.4
 fpdf2==2.7.6
-pyinstaller==6.2.0
+pyinstaller==6.16.0
+cryptography==46.0.1
+getmac==0.9.5
+requests==2.32.5

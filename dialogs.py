@@ -1,8 +1,63 @@
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
+from PySide6.QtWidgets import *
+from PySide6.QtCore import *
+from PySide6.QtGui import *
 from db import POSDatabase
 from decimal import Decimal, InvalidOperation
+
+class ProductSalesDialog(QDialog):
+    def __init__(self, db: POSDatabase, product_id: int, variant_id: int, start_date: str, end_date: str, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.product_id = product_id
+        self.variant_id = variant_id
+        self.start_date = start_date
+        self.end_date = end_date
+        self.setWindowTitle("Product Sales")
+        self.setMinimumWidth(600)
+
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Date", "Quantity", "Unit Price", "Total"])
+        layout.addWidget(self.table)
+
+        self.load_data()
+
+    def load_data(self):
+        sales = self.db.get_sales_for_product(self.product_id, self.variant_id, self.start_date, self.end_date)
+        self.table.setRowCount(len(sales))
+        for i, sale in enumerate(sales):
+            self.table.setItem(i, 0, QTableWidgetItem(sale['sale_date']))
+            self.table.setItem(i, 1, QTableWidgetItem(str(sale['qty'])))
+            self.table.setItem(i, 2, QTableWidgetItem(f"{self.parent().currency_symbol}{sale['price']:.2f}"))
+            self.table.setItem(i, 3, QTableWidgetItem(f"{self.parent().currency_symbol}{sale['subtotal']:.2f}"))
+
+class TransactionItemsDialog(QDialog):
+    def __init__(self, db: POSDatabase, sale_id: int, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.sale_id = sale_id
+        self.setWindowTitle(f"Items in Sale #{sale_id}")
+        self.setMinimumWidth(600)
+
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Product", "Quantity", "Unit Price", "Total"])
+        layout.addWidget(self.table)
+
+        self.load_data()
+
+    def load_data(self):
+        sale_data = self.db.get_sale_with_items(self.sale_id)
+        items = sale_data['items']
+        self.table.setRowCount(len(items))
+        for i, item in enumerate(items):
+            product_name = f"{item['product_name']} ({item['variant_name']})"
+            self.table.setItem(i, 0, QTableWidgetItem(product_name))
+            self.table.setItem(i, 1, QTableWidgetItem(str(item['qty'])))
+            self.table.setItem(i, 2, QTableWidgetItem(f"{self.parent().currency_symbol}{item['price']:.2f}"))
+            self.table.setItem(i, 3, QTableWidgetItem(f"{self.parent().currency_symbol}{item['subtotal']:.2f}"))
 
 class AddSupplierDialog(QDialog):
     def __init__(self, db: POSDatabase, parent=None):
@@ -468,7 +523,7 @@ Payments:
             
             # Print dialog
             print_dialog = QPrintDialog(printer, self)
-            if print_dialog.exec_() == QPrintDialog.Accepted:
+            if print_dialog.exec() == QPrintDialog.Accepted:
                 document.print_(printer)
                 QMessageBox.information(self, "Print", "Receipt sent to printer!")
                 
@@ -598,3 +653,351 @@ Generated: {QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}
 """
         
         self.report_text.setText(report_text)
+
+class AddUserDialog(QDialog):
+    def __init__(self, db: POSDatabase, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle("Add User")
+        self.setMinimumWidth(400)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+
+        # Form
+        form_layout = QFormLayout()
+        form_layout.setSpacing(10)
+
+        self.username_input = QLineEdit()
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.confirm_password_input = QLineEdit()
+        self.confirm_password_input.setEchoMode(QLineEdit.Password)
+        self.role_combo = QComboBox()
+        self.role_combo.addItems(['cashier', 'admin'])
+
+        form_layout.addRow("Username:", self.username_input)
+        form_layout.addRow("Password:", self.password_input)
+        form_layout.addRow("Confirm Password:", self.confirm_password_input)
+        form_layout.addRow("Role:", self.role_combo)
+
+        layout.addLayout(form_layout)
+
+        # Permissions
+        permissions_group = QGroupBox("Permissions")
+        permissions_layout = QVBoxLayout(permissions_group)
+
+        self.permissions_checks = {}
+        permissions = [
+            'Can access sales tab',
+            'Can access products tab',
+            'Can access reports tab',
+            'Can access settings tab'
+        ]
+
+        for permission in permissions:
+            checkbox = QCheckBox(permission)
+            self.permissions_checks[permission] = checkbox
+            permissions_layout.addWidget(checkbox)
+
+        layout.addWidget(permissions_group)
+
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.save_user)
+        button_box.rejected.connect(self.reject)
+
+        layout.addWidget(button_box)
+
+    def save_user(self):
+        username = self.username_input.text().strip()
+        password = self.password_input.text().strip()
+        confirm_password = self.confirm_password_input.text().strip()
+        role = self.role_combo.currentText()
+
+        if not username or not password:
+            QMessageBox.warning(self, "Error", "Username and password are required.")
+            return
+
+        if password != confirm_password:
+            QMessageBox.warning(self, "Error", "Passwords do not match.")
+            return
+
+        permissions = [p for p, cb in self.permissions_checks.items() if cb.isChecked()]
+
+        if self.db.create_user(username, password, role, permissions):
+            QMessageBox.information(self, "Success", "User created successfully!")
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Error", "Username already exists!")
+
+class EditUserDialog(QDialog):
+    def __init__(self, db: POSDatabase, user: dict, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.user = user
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle("Edit User")
+        self.setMinimumWidth(400)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+
+        # Form
+        form_layout = QFormLayout()
+        form_layout.setSpacing(10)
+
+        self.username_input = QLineEdit(self.user['username'])
+        self.role_combo = QComboBox()
+        self.role_combo.addItems(['cashier', 'admin'])
+        self.role_combo.setCurrentText(self.user['role'])
+
+        form_layout.addRow("Username:", self.username_input)
+        form_layout.addRow("Role:", self.role_combo)
+
+        layout.addLayout(form_layout)
+
+        # Permissions
+        permissions_group = QGroupBox("Permissions")
+        permissions_layout = QVBoxLayout(permissions_group)
+
+        self.permissions_checks = {}
+        permissions = [
+            'Can access sales tab',
+            'Can access products tab',
+            'Can access reports tab',
+            'Can access settings tab'
+        ]
+
+        user_permissions = self.user.get('permissions', [])
+        for permission in permissions:
+            checkbox = QCheckBox(permission)
+            if permission in user_permissions:
+                checkbox.setChecked(True)
+            self.permissions_checks[permission] = checkbox
+            permissions_layout.addWidget(checkbox)
+
+        layout.addWidget(permissions_group)
+
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.save_user)
+        button_box.rejected.connect(self.reject)
+
+        reset_password_btn = QPushButton("Reset Password")
+        reset_password_btn.clicked.connect(self.reset_password)
+        button_box.addButton(reset_password_btn, QDialogButtonBox.ActionRole)
+
+        layout.addWidget(button_box)
+
+    def save_user(self):
+        username = self.username_input.text().strip()
+        role = self.role_combo.currentText()
+        permissions = [p for p, cb in self.permissions_checks.items() if cb.isChecked()]
+
+        if not username:
+            QMessageBox.warning(self, "Error", "Username is required.")
+            return
+
+        if self.db.update_user(self.user['id'], username, role, permissions):
+            QMessageBox.information(self, "Success", "User updated successfully!")
+            self.accept()
+        else:
+            QMessageBox.warning(self, "Error", "Failed to update user.")
+
+    def reset_password(self):
+        password, ok = QInputDialog.getText(self, "Reset Password", "Enter new password:", QLineEdit.Password)
+        if ok and password:
+            if self.db.reset_password(self.user['id'], password):
+                QMessageBox.information(self, "Success", "Password reset successfully!")
+            else:
+                QMessageBox.warning(self, "Error", "Failed to reset password.")
+
+class FirstTimeSetupDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("First-Time Setup")
+        self.setFixedSize(400, 200)
+
+        layout = QVBoxLayout()
+
+        form_layout = QFormLayout()
+
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("Enter your name")
+        form_layout.addRow("Name *:", self.name_input)
+
+        self.phone_input = QLineEdit()
+        self.phone_input.setPlaceholderText("Enter phone number (e.g., 254712345678)")
+        form_layout.addRow("Phone *:", self.phone_input)
+
+        layout.addLayout(form_layout)
+
+        button_layout = QHBoxLayout()
+
+        submit_btn = QPushButton("Submit")
+        submit_btn.clicked.connect(self.accept)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+
+        button_layout.addWidget(submit_btn)
+        button_layout.addWidget(cancel_btn)
+
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+
+    def get_data(self):
+        return self.name_input.text().strip(), self.phone_input.text().strip()
+
+
+class VerifyOTPDialog(QDialog):
+    def __init__(self, phone_number, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Verify OTP")
+        self.setFixedSize(400, 150)
+
+        layout = QVBoxLayout()
+
+        form_layout = QFormLayout()
+
+        self.phone_label = QLabel(phone_number)
+        form_layout.addRow("Phone:", self.phone_label)
+
+        self.otp_input = QLineEdit()
+        self.otp_input.setPlaceholderText("Enter OTP")
+        form_layout.addRow("OTP *:", self.otp_input)
+
+        layout.addLayout(form_layout)
+
+        button_layout = QHBoxLayout()
+
+        verify_btn = QPushButton("Verify")
+        verify_btn.clicked.connect(self.accept)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+
+        button_layout.addWidget(verify_btn)
+        button_layout.addWidget(cancel_btn)
+
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+
+    def get_otp(self):
+        return self.otp_input.text().strip()
+
+
+class CreateUserDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Create User")
+        self.setFixedSize(400, 200)
+
+        layout = QVBoxLayout()
+
+        form_layout = QFormLayout()
+
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("Enter username")
+        form_layout.addRow("Username *:", self.username_input)
+
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.password_input.setPlaceholderText("Enter password")
+        form_layout.addRow("Password *:", self.password_input)
+
+        self.confirm_password_input = QLineEdit()
+        self.confirm_password_input.setEchoMode(QLineEdit.Password)
+        self.confirm_password_input.setPlaceholderText("Confirm password")
+        form_layout.addRow("Confirm Password *:", self.confirm_password_input)
+
+        layout.addLayout(form_layout)
+
+        button_layout = QHBoxLayout()
+
+        create_btn = QPushButton("Create")
+        create_btn.clicked.connect(self.accept)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+
+        button_layout.addWidget(create_btn)
+        button_layout.addWidget(cancel_btn)
+
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+
+    def get_credentials(self):
+        username = self.username_input.text().strip()
+        password = self.password_input.text().strip()
+        confirm_password = self.confirm_password_input.text().strip()
+
+        if password != confirm_password:
+            return None, None
+
+        return username, password
+
+
+class ResetPasswordDialog(QDialog):
+    def __init__(self, phone_number, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Reset Password")
+        self.setFixedSize(400, 250)
+
+        layout = QVBoxLayout()
+
+        form_layout = QFormLayout()
+
+        self.phone_label = QLabel(phone_number)
+        form_layout.addRow("Phone:", self.phone_label)
+
+        self.otp_input = QLineEdit()
+        self.otp_input.setPlaceholderText("Enter OTP from SMS")
+        form_layout.addRow("OTP *:", self.otp_input)
+
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("Enter new username")
+        form_layout.addRow("New Username *:", self.username_input)
+
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.password_input.setPlaceholderText("Enter new password")
+        form_layout.addRow("New Password *:", self.password_input)
+
+        self.confirm_password_input = QLineEdit()
+        self.confirm_password_input.setEchoMode(QLineEdit.Password)
+        self.confirm_password_input.setPlaceholderText("Confirm new password")
+        form_layout.addRow("Confirm New Password *:", self.confirm_password_input)
+
+        layout.addLayout(form_layout)
+
+        button_layout = QHBoxLayout()
+
+        reset_btn = QPushButton("Reset")
+        reset_btn.clicked.connect(self.accept)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+
+        button_layout.addWidget(reset_btn)
+        button_layout.addWidget(cancel_btn)
+
+        layout.addLayout(button_layout)
+        self.setLayout(layout)
+
+    def get_data(self):
+        otp = self.otp_input.text().strip()
+        username = self.username_input.text().strip()
+        password = self.password_input.text().strip()
+        confirm_password = self.confirm_password_input.text().strip()
+
+        if password != confirm_password:
+            return None, None, None
+
+        return otp, username, password

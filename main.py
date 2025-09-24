@@ -1,14 +1,17 @@
 import sys
 import os
 from datetime import datetime
-from PyQt5.QtWidgets import *
-from PyQt5.QtCore import *
-from PyQt5.QtGui import *
+from PySide6.QtWidgets import *
+from PySide6.QtCore import *
+from PySide6.QtGui import *
 from db import POSDatabase
 from config import TAX_INCLUSIVE
 from payment_dialog import SplitPaymentDialog
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from dialogs import AddUserDialog, EditUserDialog
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+import user_auth
+from dialogs import FirstTimeSetupDialog, VerifyOTPDialog, CreateUserDialog, ResetPasswordDialog
 
 class LoginDialog(QDialog):
     def __init__(self, db: POSDatabase):
@@ -46,14 +49,12 @@ class LoginDialog(QDialog):
                 background-color: #f0f0f0;
             }
             QLabel {
-                font-size: 14px;
                 color: #333;
             }
             QLineEdit {
                 padding: 8px;
                 border: 2px solid #ddd;
                 border-radius: 4px;
-                font-size: 14px;
             }
             QPushButton {
                 background-color: #007bff;
@@ -61,7 +62,6 @@ class LoginDialog(QDialog):
                 padding: 10px 20px;
                 border: none;
                 border-radius: 4px;
-                font-size: 14px;
                 min-width: 100px;
             }
             QPushButton:hover, QPushButton:focus {
@@ -78,7 +78,10 @@ class LoginDialog(QDialog):
         # Title
         title = QLabel("Point of Sale System")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 18px; font-weight: bold; margin: 20px;")
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        title.setStyleSheet("margin: 20px;")
         layout.addWidget(title)
         
         # Form
@@ -115,7 +118,7 @@ class LoginDialog(QDialog):
         # Info label
         info = QLabel("Default: admin / admin123")
         info.setAlignment(Qt.AlignCenter)
-        info.setStyleSheet("color: #666; font-size: 12px; margin-top: 10px;")
+        info.setStyleSheet("color: #666; margin-top: 10px;")
         layout.addWidget(info)
         
         self.setLayout(layout)
@@ -142,22 +145,89 @@ class LoginDialog(QDialog):
     def login(self):
         username = self.username_input.text().strip()
         password = self.password_input.text().strip()
-        
+
         if not username or not password:
             QMessageBox.warning(self, "Error", "Please enter both username and password")
             self.username_input.setFocus()
             self.current_focus = 0
             return
-            
+
+        if username == "admin" and password == "admin123":
+            self.handle_password_reset()
+            return
+
         user = self.db.authenticate_user(username, password)
         if user:
-            self.user = user
-            self.accept()
+            # On successful login, verify machine fingerprint
+            syscfg_data = user_auth.read_syscfg_file()
+            if syscfg_data and syscfg_data.get("machine_fingerprint") == user_auth.get_machine_fingerprint():
+                self.user = user
+                self.accept()
+            else:
+                QMessageBox.critical(self, "Activation Error", "This software is not activated for this machine.")
+                # Optionally, you could clear the syscfg file here to force reactivation
+                # os.remove(user_auth.get_syscfg_path())
         else:
             QMessageBox.critical(self, "Login Failed", "Invalid username or password")
             self.password_input.clear()
             self.password_input.setFocus()
             self.current_focus = 1
+
+    def handle_password_reset(self):
+        if not user_auth.check_syscfg_exists():
+            QMessageBox.critical(self, "Error", "System not activated. Password reset is not available.")
+            return
+
+        syscfg_data = user_auth.read_syscfg_file()
+        if not syscfg_data:
+            QMessageBox.critical(self, "Error", "Could not read activation file.")
+            return
+
+        phone_number = syscfg_data.get("phone_number")
+
+        # Request OTP for password reset
+        response = user_auth.send_activation_request("Password Reset", phone_number)
+        if not response.get("success"):
+            QMessageBox.critical(self, "Error", response.get("message", "Failed to send OTP for password reset."))
+            return
+
+        reset_dialog = ResetPasswordDialog(phone_number)
+        if reset_dialog.exec() == QDialog.Accepted:
+            otp, new_username, new_password = reset_dialog.get_data()
+
+            if not all([otp, new_username, new_password]):
+                QMessageBox.critical(self, "Error", "All fields are required.")
+                return
+
+            # Verify OTP
+            verify_response = user_auth.verify_otp(phone_number, otp)
+            if not verify_response.get("success"):
+                QMessageBox.critical(self, "Error", verify_response.get("message", "OTP verification failed."))
+                return
+
+            # In a real application, you would likely want to find the user by phone number
+            # or have a more robust way to identify the user to update.
+            # For this example, we'll just create a new user or update an existing one.
+            # This is a simplification.
+            user = self.db.get_user_by_username(new_username)
+            if user:
+                if self.db.reset_password(user['id'], new_password):
+                     QMessageBox.information(self, "Success", "Password updated successfully!")
+                else:
+                    QMessageBox.critical(self, "Error", "Failed to update password.")
+            else:
+                if self.db.create_user(new_username, new_password, "admin", ["Can access sales tab", "Can access products tab", "Can access reports tab", "Can access settings tab"]):
+                    QMessageBox.information(self, "Success", "New user created successfully!")
+                else:
+                    QMessageBox.critical(self, "Error", "Failed to create new user.")
+
+            # Re-write the syscfg file to update the fingerprint if it has changed
+            machine_fingerprint = user_auth.get_machine_fingerprint()
+            user_auth.write_syscfg_file(phone_number, machine_fingerprint)
+
+        self.username_input.clear()
+        self.password_input.clear()
+        self.username_input.setFocus()
 
 class ShiftDialog(QDialog):
     def __init__(self, db: POSDatabase, user_id: int):
@@ -201,8 +271,9 @@ class ShiftDialog(QDialog):
             QMessageBox.warning(self, "Error", "Please enter a valid number")
 
 class POSMainWindow(QMainWindow):
-    def __init__(self, db: POSDatabase, user: dict):
+    def __init__(self, app, db: POSDatabase, user: dict):
         super().__init__()
+        self.app = app
         self.db = db
         self.user = user
         self.should_logout = False
@@ -222,7 +293,7 @@ class POSMainWindow(QMainWindow):
         else:
             # Start new shift
             shift_dialog = ShiftDialog(self.db, self.user['id'])
-            if shift_dialog.exec_() == QDialog.Accepted:
+            if shift_dialog.exec() == QDialog.Accepted:
                 shift_id = self.db.start_shift(self.user['id'], shift_dialog.opening_cash)
                 self.current_shift = self.db.get_active_shift(self.user['id'])
             else:
@@ -274,11 +345,14 @@ class POSMainWindow(QMainWindow):
         self.setCentralWidget(self.tabs)
         
         # Create tabs
-        self.create_sales_tab()
-        if self.user['role'] == 'admin':
+        permissions = self.user.get('permissions', [])
+        if self.user['role'] == 'admin' or 'Can access sales tab' in permissions:
+            self.create_sales_tab()
+        if self.user['role'] == 'admin' or 'Can access products tab' in permissions:
             self.create_products_tab()
-        self.create_reports_tab()
-        if self.user['role'] == 'admin':
+        if self.user['role'] == 'admin' or 'Can access reports tab' in permissions:
+            self.create_reports_tab()
+        if self.user['role'] == 'admin' or 'Can access settings tab' in permissions:
             self.create_settings_tab()
         
         # Status bar
@@ -411,7 +485,9 @@ class POSMainWindow(QMainWindow):
         self.tax_label = QLabel(f"Tax: {self.db.get_setting('currency_symbol')}0.00") 
         self.discount_label = QLabel(f"Discount: {self.db.get_setting('currency_symbol')}0.00")
         self.total_label = QLabel(f"Total: {self.db.get_setting('currency_symbol')}0.00")
-        self.total_label.setStyleSheet("font-weight: bold; font-size: 16px;")
+        font = self.total_label.font()
+        font.setBold(True)
+        self.total_label.setFont(font)
         
         totals_layout.addWidget(self.subtotal_label)
         totals_layout.addWidget(self.tax_label)
@@ -525,10 +601,12 @@ class POSMainWindow(QMainWindow):
         layout = QVBoxLayout()
         
         title_label = QLabel(title)
-        title_label.setStyleSheet("font-size: 14px; color: #888;")
+        title_label.setStyleSheet("color: #888;")
         
         value_label = QLabel(value)
-        value_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        font = value_label.font()
+        font.setBold(True)
+        value_label.setFont(font)
         
         layout.addWidget(title_label)
         layout.addWidget(value_label)
@@ -538,15 +616,19 @@ class POSMainWindow(QMainWindow):
 
     def create_reports_tab(self):
         """Create reports tab"""
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
         reports_widget = QWidget()
-        layout = QVBoxLayout()
-        reports_widget.setLayout(layout)
+        scroll_area.setWidget(reports_widget)
+        layout = QVBoxLayout(reports_widget)
 
         # Header
         header_layout = QHBoxLayout()
         store_name = self.db.get_setting('store_name')
         header_label = QLabel(f"{store_name} Reports Dashboard")
-        header_label.setStyleSheet("font-size: 24px; font-weight: bold;")
+        font = header_label.font()
+        font.setBold(True)
+        header_label.setFont(font)
         header_layout.addWidget(header_label)
         header_layout.addStretch()
         layout.addLayout(header_layout)
@@ -617,7 +699,7 @@ class POSMainWindow(QMainWindow):
         footer_layout.addWidget(print_btn)
         layout.addLayout(footer_layout)
 
-        self.tabs.addTab(reports_widget, "Reports")
+        self.tabs.addTab(scroll_area, "Reports")
 
         # Connect signals
         self.today_rb.toggled.connect(self.update_reports)
@@ -627,6 +709,10 @@ class POSMainWindow(QMainWindow):
         self.to_date.dateChanged.connect(self.update_reports)
 
         self.update_reports()
+
+    @property
+    def currency_symbol(self):
+        return self.db.get_setting('currency_symbol') or '$'
 
     def update_reports(self):
         start_date = self.from_date.date().toString("yyyy-MM-dd")
@@ -644,10 +730,10 @@ class POSMainWindow(QMainWindow):
         num_sales = self.db.get_number_of_sales(start_date, end_date)
         items_sold = self.db.get_items_sold(start_date, end_date)
         profit = self.db.get_profit(start_date, end_date)
-        self.total_sales_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(f"${total_sales:.2f}")
+        self.total_sales_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(f"{self.currency_symbol}{total_sales:.2f}")
         self.num_sales_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(str(num_sales))
         self.items_sold_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(str(items_sold))
-        self.profit_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(f"${profit:.2f}")
+        self.profit_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(f"{self.currency_symbol}{profit:.2f}")
 
         # Update payment method chart
         payment_data = self.db.get_sales_by_payment_method(start_date, end_date)
@@ -665,12 +751,12 @@ class POSMainWindow(QMainWindow):
             self.sales_table.setItem(i, 1, QTableWidgetItem(str(sale['sale_id'])))
             self.sales_table.setItem(i, 2, QTableWidgetItem("N/A")) # Customer name is not available
             self.sales_table.setItem(i, 3, QTableWidgetItem(str(self.db.get_items_sold_for_sale(sale['sale_id'])))) # Need a new db method for this
-            self.sales_table.setItem(i, 4, QTableWidgetItem(f"${sale['total_amount']:.2f}"))
+            self.sales_table.setItem(i, 4, QTableWidgetItem(f"{self.currency_symbol}{sale['total_amount']:.2f}"))
             self.sales_table.setItem(i, 5, QTableWidgetItem(sale['payments']))
             self.sales_table.setItem(i, 6, QTableWidgetItem(sale['status']))
 
     def update_payment_chart(self, data):
-        for i in reversed(range(self.payment_chart_layout.count())): 
+        for i in reversed(range(self.payment_chart_layout.count())):
             self.payment_chart_layout.itemAt(i).widget().setParent(None)
 
         if not data:
@@ -709,59 +795,86 @@ class POSMainWindow(QMainWindow):
         ax.set_title("Top Selling Products")
         ax.set_ylabel("Quantity Sold")
         fig.autofmt_xdate()
-        
     def create_settings_tab(self):
         """Create settings tab (admin only)"""
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
         settings_widget = QWidget()
-        layout = QVBoxLayout()
-        
-        # Settings form
-        form_layout = QFormLayout()
+        scroll_area.setWidget(settings_widget)
+        layout = QVBoxLayout(settings_widget)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(20)
+
+        # Store Settings
+        store_group = QGroupBox("Store Settings")
+        store_layout = QFormLayout(store_group)
+        store_layout.setSpacing(10)
         
         self.store_name_input = QLineEdit()
         self.store_address_input = QTextEdit()
         self.store_address_input.setMaximumHeight(80)
         self.currency_input = QLineEdit()
         self.tax_rate_input = QLineEdit()
+        
+        store_layout.addRow("Store Name:", self.store_name_input)
+        store_layout.addRow("Store Address:", self.store_address_input)
+        store_layout.addRow("Currency Symbol:", self.currency_input)
+        store_layout.addRow("Tax Rate (%):", self.tax_rate_input)
+        
+        layout.addWidget(store_group)
+
+        # Receipt Settings
+        receipt_group = QGroupBox("Receipt Settings")
+        receipt_layout = QFormLayout(receipt_group)
+        receipt_layout.setSpacing(10)
+
         self.receipt_footer_input = QTextEdit()
         self.receipt_footer_input.setMaximumHeight(60)
-        
-        form_layout.addRow("Store Name:", self.store_name_input)
-        form_layout.addRow("Store Address:", self.store_address_input)
-        form_layout.addRow("Currency Symbol:", self.currency_input)
-        form_layout.addRow("Tax Rate (%):", self.tax_rate_input)
-        form_layout.addRow("Receipt Footer:", self.receipt_footer_input)
-        
-        layout.addLayout(form_layout)
+        receipt_layout.addRow("Receipt Footer:", self.receipt_footer_input)
+
+        layout.addWidget(receipt_group)
+
+        # UI Settings
+        ui_group = QGroupBox("UI Settings")
+        ui_layout = QFormLayout(ui_group)
+        ui_layout.setSpacing(10)
+
+        self.font_size_combo = QComboBox()
+        self.font_size_combo.addItems(["Small", "Medium", "Large"])
+        ui_layout.addRow("Font Size:", self.font_size_combo)
+
+        layout.addWidget(ui_group)
         
         # Save button
         save_settings_btn = QPushButton("Save Settings")
         save_settings_btn.clicked.connect(self.save_settings)
-        layout.addWidget(save_settings_btn)
+        save_settings_btn.setStyleSheet("min-width: 120px; padding: 10px;")
+        layout.addWidget(save_settings_btn, 0, Qt.AlignRight)
         
         # User management section
-        layout.addWidget(QLabel("User Management"))
-        
-        users_layout = QHBoxLayout()
+        user_group = QGroupBox("User Management")
+        users_layout = QVBoxLayout(user_group)
         
         self.users_table = QTableWidget()
-        self.users_table.setColumnCount(4)
-        self.users_table.setHorizontalHeaderLabels(['ID', 'Username', 'Role', 'Created'])
+        self.users_table.setColumnCount(5)
+        self.users_table.setHorizontalHeaderLabels(['ID', 'Username', 'Role', 'Created', 'Actions'])
+        self.users_table.horizontalHeader().setStretchLastSection(True)
+        self.users_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.users_table.setMinimumHeight(300)
         users_layout.addWidget(self.users_table)
         
-        user_buttons = QVBoxLayout()
+        user_buttons = QHBoxLayout()
         add_user_btn = QPushButton("Add User")
         add_user_btn.clicked.connect(self.add_user_dialog)
         user_buttons.addWidget(add_user_btn)
         user_buttons.addStretch()
         
         users_layout.addLayout(user_buttons)
-        layout.addLayout(users_layout)
+        layout.addWidget(user_group)
         
         layout.addStretch()
         
-        settings_widget.setLayout(layout)
-        self.tabs.addTab(settings_widget, "Settings")
+        self.tabs.addTab(scroll_area, "Settings")
         
         self.load_settings()
         self.load_users()
@@ -816,27 +929,29 @@ class POSMainWindow(QMainWindow):
             
             # Product name
             name_label = QLabel(f"{product['product_name']}")
-            name_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+            font = name_label.font()
+            font.setBold(True)
+            name_label.setFont(font)
             name_label.setWordWrap(True)
             card_layout.addWidget(name_label)
             
             # Variant and price (inclusive of tax)
             price_with_tax = self.get_price_with_tax(product['price'])
             variant_label = QLabel(f"{product['variant_name']} - {self.db.get_setting('currency_symbol')}{price_with_tax:.2f}")
-            variant_label.setStyleSheet("color: #666; font-size: 12px;")
+            variant_label.setStyleSheet("color: #666;")
             card_layout.addWidget(variant_label)
             
             # Stock
             stock_color = "#28a745" if product['stock_quantity'] > product['reorder_level'] else "#ffc107" if product['stock_quantity'] > 0 else "#dc3545"
             stock_label = QLabel(f"Stock: {product['stock_quantity']}")
-            stock_label.setStyleSheet(f"color: {stock_color}; font-size: 12px;")
+            stock_label.setStyleSheet(f"color: {stock_color};")
             card_layout.addWidget(stock_label)
 
-            card_layout.addStretch()
+            card_layout.addStretch() 
             
             # Add to cart button
             add_btn = QPushButton("Add to Cart")
-            add_btn.setStyleSheet("font-size: 10px; padding: 4px;")
+            add_btn.setStyleSheet("padding: 4px;")
             add_btn.clicked.connect(lambda checked, p=product: self.add_to_cart(p))
             card_layout.addWidget(add_btn)
             
@@ -1035,7 +1150,7 @@ class POSMainWindow(QMainWindow):
 
         layout.addRow(buttons)
         dialog.setLayout(layout)
-        dialog.exec_()
+        dialog.exec()
                 
     def process_cash_payment(self):
         self.process_payment("Cash")
@@ -1135,7 +1250,7 @@ class POSMainWindow(QMainWindow):
             total = subtotal + tax_amount
 
         dialog = SplitPaymentDialog(total, self)
-        if dialog.exec_() == QDialog.Accepted:
+        if dialog.exec() == QDialog.Accepted:
             payments = dialog.payments
             
             # Process sale
@@ -1248,7 +1363,7 @@ class POSMainWindow(QMainWindow):
         """
         
         msg.setText(info_text)
-        msg.exec_()
+        msg.exec()
         
     def generate_report(self):
         """Generate sales report"""
@@ -1275,11 +1390,7 @@ REVENUE BY PAYMENT METHOD
         for pm in summary['payment_methods']:
             report_text += f"{pm['method']}: ${pm['total']:.2f}\n"
 
-        report_text += """
-
-TOP PRODUCTS
-------------
-"""
+        report_text += "\nTOP PRODUCTS\n------------\n"
         
         for product in summary['top_products'][:10]:
             report_text += f"{product['product_name']} ({product['variant_name']}): {product['total_qty']} units - {self.db.get_setting('currency_symbol')}{product['total_revenue']:.2f}\n"
@@ -1300,6 +1411,25 @@ TOP PRODUCTS
         self.currency_input.setText(settings.get('currency_symbol', '$'))
         self.tax_rate_input.setText(settings.get('tax_rate', '0'))
         self.receipt_footer_input.setText(settings.get('receipt_footer', ''))
+
+        font_size = settings.get('font_size', 'Medium')
+        index = self.font_size_combo.findText(font_size)
+        if index != -1:
+            self.font_size_combo.setCurrentIndex(index)
+        self.set_font_size(font_size)
+
+    def set_font_size(self, size_str):
+        """Set application font size"""
+        if size_str == 'Small':
+            font_size = 10
+        elif size_str == 'Large':
+            font_size = 14
+        else: # Medium
+            font_size = 12
+        
+        font = self.app.font()
+        font.setPointSize(font_size)
+        self.app.setFont(font)
         
     def save_settings(self):
         """Save settings"""
@@ -1308,6 +1438,10 @@ TOP PRODUCTS
         self.db.set_setting('currency_symbol', self.currency_input.text())
         self.db.set_setting('tax_rate', self.tax_rate_input.text())
         self.db.set_setting('receipt_footer', self.receipt_footer_input.toPlainText())
+        
+        font_size_str = self.font_size_combo.currentText()
+        self.db.set_setting('font_size', font_size_str)
+        self.set_font_size(font_size_str)
         
         QMessageBox.information(self, "Settings", "Settings saved successfully!")
         
@@ -1321,47 +1455,46 @@ TOP PRODUCTS
             self.users_table.setItem(i, 1, QTableWidgetItem(user['username']))
             self.users_table.setItem(i, 2, QTableWidgetItem(user['role'].title()))
             self.users_table.setItem(i, 3, QTableWidgetItem(user['created_at'][:10]))
+
+            actions_widget = QWidget()
+            actions_layout = QHBoxLayout()
+            actions_layout.setContentsMargins(0, 0, 0, 0)
+
+            edit_btn = QPushButton("Edit")
+            edit_btn.clicked.connect(lambda checked, u=user: self.edit_user_dialog(u))
+            actions_layout.addWidget(edit_btn)
+
+            delete_btn = QPushButton("Delete")
+            delete_btn.setStyleSheet("background-color: #dc3545;")
+            delete_btn.clicked.connect(lambda checked, u=user: self.delete_user(u))
+            actions_layout.addWidget(delete_btn)
+
+            actions_widget.setLayout(actions_layout)
+            self.users_table.setCellWidget(i, 4, actions_widget)
+
+    def edit_user_dialog(self, user):
+        """Show edit user dialog"""
+        dialog = EditUserDialog(self.db, user, self)
+        if dialog.exec() == QDialog.Accepted:
+            self.load_users()
+
+    def delete_user(self, user):
+        """Delete a user"""
+        reply = QMessageBox.question(self, "Delete User", f"Are you sure you want to delete the user '{user['username']}'?",
+                                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+
+        if reply == QMessageBox.Yes:
+            if self.db.delete_user(user['id']):
+                QMessageBox.information(self, "Success", "User deleted successfully!")
+                self.load_users()
+            else:
+                QMessageBox.warning(self, "Error", "Failed to delete user.")
             
     def add_user_dialog(self):
         """Show add user dialog"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Add User")
-        dialog.setFixedSize(300, 200)
-        
-        layout = QFormLayout()
-        
-        username_input = QLineEdit()
-        password_input = QLineEdit()
-        password_input.setEchoMode(QLineEdit.Password)
-        role_combo = QComboBox()
-        role_combo.addItems(['cashier', 'admin'])
-        
-        layout.addRow("Username:", username_input)
-        layout.addRow("Password:", password_input)
-        layout.addRow("Role:", role_combo)
-        
-        buttons = QHBoxLayout()
-        save_btn = QPushButton("Save")
-        cancel_btn = QPushButton("Cancel")
-        
-        buttons.addWidget(save_btn)
-        buttons.addWidget(cancel_btn)
-        
-        layout.addRow(buttons)
-        dialog.setLayout(layout)
-        
-        def save_user():
-            if self.db.create_user(username_input.text(), password_input.text(), role_combo.currentText()):
-                QMessageBox.information(self, "Success", "User created successfully!")
-                dialog.accept()
-                self.load_users()
-            else:
-                QMessageBox.warning(self, "Error", "Username already exists!")
-                
-        save_btn.clicked.connect(save_user)
-        cancel_btn.clicked.connect(dialog.reject)
-        
-        dialog.exec_()
+        dialog = AddUserDialog(self.db, self)
+        if dialog.exec() == QDialog.Accepted:
+            self.load_users()
         
     def add_product_dialog(self):
         """Show add product dialog with variant support"""
@@ -1459,7 +1592,7 @@ TOP PRODUCTS
         
         layout.addWidget(button_box)
         dialog.setLayout(layout)
-        dialog.exec_()
+        dialog.exec()
         
     def add_variant_row(self, variant_name="", barcode="", purchase_price=0, price=0, stock=0, reorder_level=5, variant_id=None):
         """Add a new variant row to the variants table"""
@@ -1701,7 +1834,7 @@ TOP PRODUCTS
         
         layout.addRow(button_box)
         dialog.setLayout(layout)
-        dialog.exec_()
+        dialog.exec()
         
     def edit_product(self, product):
         """Edit product"""
@@ -1816,7 +1949,7 @@ TOP PRODUCTS
 
         layout.addWidget(button_box)
         dialog.setLayout(layout)
-        dialog.exec_()
+        dialog.exec()
 
     def save_edited_product(self, dialog, product_id):
         """Save the edited product and its variants"""
@@ -1932,7 +2065,7 @@ TOP PRODUCTS
             shift_data['closing_cash'] = closing_cash
             
             eod_dialog = EndOfDayDialog(self.db, shift_data, self)
-            eod_dialog.exec_()
+            eod_dialog.exec()
             
             # Restart shift
             self.current_shift = None
@@ -1973,6 +2106,7 @@ class POSApplication:
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.db = POSDatabase()
+        self.db.init_database()
         
         # Set application properties
         self.app.setApplicationName("POS System")
@@ -1989,24 +2123,95 @@ class POSApplication:
         
     def run(self):
         """Run the application"""
+        if not user_auth.check_syscfg_exists():
+            reply = QMessageBox.question(None, "First-Time Setup", 
+                                           "This application is not activated. Do you want to perform first-time setup?",
+                                           QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                if not self.perform_first_time_setup():
+                    return -1 # Exit if setup fails
+            else:
+                return -1 # Exit if user declines setup
+
         while True:
             # Show login dialog
             login_dialog = LoginDialog(self.db)
-            if login_dialog.exec_() != QDialog.Accepted:
+            if login_dialog.exec() != QDialog.Accepted:
                 break
                 
             # Create main window
-            main_window = POSMainWindow(self.db, login_dialog.user)
+            main_window = POSMainWindow(self.app, self.db, login_dialog.user)
             main_window.show()
             
             # Run event loop
-            self.app.exec_()
+            self.app.exec()
             
             # Check if we should continue (logout vs exit)
-            if not hasattr(main_window, 'should_logout'):
+            if not hasattr(main_window, 'should_logout') or not main_window.should_logout:
                 break
                 
         return 0
+
+    def perform_first_time_setup(self):
+        """Handles the entire first-time setup and activation process."""
+        # 1. Get user info
+        setup_dialog = FirstTimeSetupDialog()
+        if setup_dialog.exec() != QDialog.Accepted:
+            return False
+
+        name, phone_number = setup_dialog.get_data()
+        if not name or not phone_number:
+            QMessageBox.critical(None, "Error", "Name and phone number are required.")
+            return False
+
+        # 2. Request OTP
+        response = user_auth.send_activation_request(name, phone_number)
+        if not response.get("success"):
+            QMessageBox.critical(None, "Error", response.get("message", "Failed to send activation request."))
+            return False
+        
+        QMessageBox.information(None, "OTP Sent", "An OTP has been sent to your phone number.")
+
+        # 3. Verify OTP
+        verify_dialog = VerifyOTPDialog(phone_number)
+        if verify_dialog.exec() != QDialog.Accepted:
+            return False
+
+        otp = verify_dialog.get_otp()
+        if not otp:
+            QMessageBox.critical(None, "Error", "OTP is required.")
+            return False
+
+        verify_response = user_auth.verify_otp(phone_number, otp)
+        if not verify_response.get("success"):
+            QMessageBox.critical(None, "Error", verify_response.get("message", "OTP verification failed."))
+            return False
+            
+        QMessageBox.information(None, "Success", "OTP verified successfully!")
+
+        # 4. Create user
+        create_user_dialog = CreateUserDialog()
+        if create_user_dialog.exec() != QDialog.Accepted:
+            return False
+
+        username, password = create_user_dialog.get_credentials()
+        if not username or not password:
+            QMessageBox.critical(None, "Error", "Username and password are required.")
+            return False
+
+        if not self.db.create_user(username, password, "admin", ["Can access sales tab", "Can access products tab", "Can access reports tab", "Can access settings tab"]):
+            QMessageBox.critical(None, "Error", "Failed to create user. Username might already exist.")
+            return False
+            
+        QMessageBox.information(None, "User Created", "Administrator user created successfully.")
+
+        # 5. Write syscfg file
+        machine_fingerprint = user_auth.get_machine_fingerprint()
+        user_auth.write_syscfg_file(phone_number, machine_fingerprint)
+        
+        QMessageBox.information(None, "Activation Complete", "Application activated successfully! Please login.")
+
+        return True
 
 
 if __name__ == '__main__':
