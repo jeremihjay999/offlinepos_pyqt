@@ -42,8 +42,8 @@ class TransactionItemsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Product", "Quantity", "Unit Price", "Total"])
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["Product", "Qty", "Net (Excl. VAT)", "VAT", "Gross (Incl. VAT)"])
         layout.addWidget(self.table)
 
         self.load_data()
@@ -51,13 +51,22 @@ class TransactionItemsDialog(QDialog):
     def load_data(self):
         sale_data = self.db.get_sale_with_items(self.sale_id)
         items = sale_data['items']
+        tax_rate = float(self.db.get_setting('tax_rate') or '0') / 100
+        
         self.table.setRowCount(len(items))
         for i, item in enumerate(items):
             product_name = f"{item['product_name']} ({item['variant_name']})"
+            net_price = item['price']
+            qty = item['qty']
+            
+            vat_amount = net_price * tax_rate
+            gross_price = net_price + vat_amount
+            
             self.table.setItem(i, 0, QTableWidgetItem(product_name))
-            self.table.setItem(i, 1, QTableWidgetItem(str(item['qty'])))
-            self.table.setItem(i, 2, QTableWidgetItem(f"{self.parent().currency_symbol}{item['price']:.2f}"))
-            self.table.setItem(i, 3, QTableWidgetItem(f"{self.parent().currency_symbol}{item['subtotal']:.2f}"))
+            self.table.setItem(i, 1, QTableWidgetItem(str(qty)))
+            self.table.setItem(i, 2, QTableWidgetItem(f"{self.parent().currency_symbol}{net_price:.2f}"))
+            self.table.setItem(i, 3, QTableWidgetItem(f"{self.parent().currency_symbol}{vat_amount:.2f}"))
+            self.table.setItem(i, 4, QTableWidgetItem(f"{self.parent().currency_symbol}{gross_price:.2f}"))
 
 class AddSupplierDialog(QDialog):
     def __init__(self, db: POSDatabase, parent=None):
@@ -421,7 +430,6 @@ class ReceiptPrintDialog(QDialog):
         # Receipt preview
         self.receipt_preview = QTextEdit()
         self.receipt_preview.setReadOnly(True)
-        self.receipt_preview.setFont(QFont("Courier", 10))
         
         self.generate_receipt_preview()
         
