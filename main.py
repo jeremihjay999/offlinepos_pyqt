@@ -7,7 +7,7 @@ from PySide6.QtGui import *
 from db import POSDatabase
 from config import TAX_INCLUSIVE
 from payment_dialog import SplitPaymentDialog
-from dialogs import AddUserDialog, EditUserDialog
+from dialogs import AddUserDialog, EditUserDialog, ProductSalesDialog, TransactionItemsDialog
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import user_auth
@@ -78,9 +78,6 @@ class LoginDialog(QDialog):
         # Title
         title = QLabel("Point of Sale System")
         title.setAlignment(Qt.AlignCenter)
-        font = title.font()
-        font.setBold(True)
-        title.setFont(font)
         title.setStyleSheet("margin: 20px;")
         layout.addWidget(title)
         
@@ -330,7 +327,6 @@ class POSMainWindow(QMainWindow):
                 padding: 8px 16px;
                 border: none;
                 border-radius: 4px;
-                font-weight: bold;
             }
             QPushButton:hover {
                 background-color: #0056b3;
@@ -361,6 +357,15 @@ class POSMainWindow(QMainWindow):
         
         # Menu bar
         self.create_menu_bar()
+
+        self.apply_font_to_tables()
+
+    def apply_font_to_tables(self):
+        """Apply the application font to all table headers."""
+        font = self.app.font()
+        for table in self.findChildren(QTableWidget):
+            table.horizontalHeader().setFont(font)
+            table.verticalHeader().setFont(font)
 
     def setup_shortcuts(self):
         """Setup keyboard shortcuts"""
@@ -485,9 +490,6 @@ class POSMainWindow(QMainWindow):
         self.tax_label = QLabel(f"Tax: {self.db.get_setting('currency_symbol')}0.00") 
         self.discount_label = QLabel(f"Discount: {self.db.get_setting('currency_symbol')}0.00")
         self.total_label = QLabel(f"Total: {self.db.get_setting('currency_symbol')}0.00")
-        font = self.total_label.font()
-        font.setBold(True)
-        self.total_label.setFont(font)
         
         totals_layout.addWidget(self.subtotal_label)
         totals_layout.addWidget(self.tax_label)
@@ -604,9 +606,6 @@ class POSMainWindow(QMainWindow):
         title_label.setStyleSheet("color: #888;")
         
         value_label = QLabel(value)
-        font = value_label.font()
-        font.setBold(True)
-        value_label.setFont(font)
         
         layout.addWidget(title_label)
         layout.addWidget(value_label)
@@ -618,17 +617,16 @@ class POSMainWindow(QMainWindow):
         """Create reports tab"""
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
+        
         reports_widget = QWidget()
         scroll_area.setWidget(reports_widget)
+        
         layout = QVBoxLayout(reports_widget)
 
         # Header
         header_layout = QHBoxLayout()
         store_name = self.db.get_setting('store_name')
         header_label = QLabel(f"{store_name} Reports Dashboard")
-        font = header_label.font()
-        font.setBold(True)
-        header_label.setFont(font)
         header_layout.addWidget(header_label)
         header_layout.addStretch()
         layout.addLayout(header_layout)
@@ -655,20 +653,40 @@ class POSMainWindow(QMainWindow):
         date_range_layout.addStretch()
         layout.addLayout(date_range_layout)
 
-        # Summary Cards
+        # --- Main reports content ---
+        reports_content_widget = QWidget()
+        reports_content_layout = QVBoxLayout(reports_content_widget)
+        layout.addWidget(reports_content_widget)
+
+        # Sales Summary
+        summary_group = QGroupBox("Sales Summary")
         summary_layout = QHBoxLayout()
-        self.total_sales_card = self.create_summary_card("Total Sales", "$0.00")
-        self.num_sales_card = self.create_summary_card("Number of Sales", "0")
-        self.items_sold_card = self.create_summary_card("Items Sold", "0")
-        self.profit_card = self.create_summary_card("Profit", "$0.00")
+        summary_group.setLayout(summary_layout)
+        self.total_sales_card = self.create_summary_card("Total Sales", "0.00")
+        self.num_sales_card = self.create_summary_card("Total Transactions", "0")
+        self.items_sold_card = self.create_summary_card("Total Items Sold", "0")
+        self.profit_card = self.create_summary_card("Profit", "0.00")
         summary_layout.addWidget(self.total_sales_card)
         summary_layout.addWidget(self.num_sales_card)
         summary_layout.addWidget(self.items_sold_card)
         summary_layout.addWidget(self.profit_card)
-        layout.addLayout(summary_layout)
+        reports_content_layout.addWidget(summary_group)
+
+        # Cash Drawer Summary
+        cash_drawer_group = QGroupBox("Cash Drawer Summary")
+        cash_drawer_layout = QVBoxLayout()
+        cash_drawer_group.setLayout(cash_drawer_layout)
+        self.cash_drawer_table = QTableWidget()
+        self.cash_drawer_table.setColumnCount(6)
+        self.cash_drawer_table.setHorizontalHeaderLabels(["Cashier", "Opening", "Closing", "Expected Cash", "Actual Cash", "Over/Short"])
+        self.cash_drawer_table.setMinimumHeight(300) # Approx 10 rows
+        cash_drawer_layout.addWidget(self.cash_drawer_table)
+        reports_content_layout.addWidget(cash_drawer_group)
 
         # Charts
+        charts_group = QGroupBox("Visuals")
         charts_layout = QHBoxLayout()
+        charts_group.setLayout(charts_layout)
         
         # Payment method chart
         self.payment_chart_widget = QWidget()
@@ -681,14 +699,30 @@ class POSMainWindow(QMainWindow):
         self.top_products_chart_layout = QVBoxLayout()
         self.top_products_chart_widget.setLayout(self.top_products_chart_layout)
         charts_layout.addWidget(self.top_products_chart_widget)
+        reports_content_layout.addWidget(charts_group)
 
-        layout.addLayout(charts_layout)
+        # --- Detailed Tables (in a new Tab widget) ---
+        details_tabs = QTabWidget()
+        reports_content_layout.addWidget(details_tabs)
 
-        # Detailed Sales Table
-        self.sales_table = QTableWidget()
-        self.sales_table.setColumnCount(7)
-        self.sales_table.setHorizontalHeaderLabels(["Date", "Sale ID", "Customer", "Items", "Total", "Payment(s)", "Status"])
-        layout.addWidget(self.sales_table)
+        # Detailed Transactions Table
+        transactions_widget = QWidget()
+        transactions_layout = QVBoxLayout(transactions_widget)
+        self.transactions_table = QTableWidget()
+        self.transactions_table.setColumnCount(7)
+        self.transactions_table.setHorizontalHeaderLabels(["Date", "Cashier", "Payment Method", "Amount", "Transaction Code", "Status", "Actions"])
+        self.transactions_table.setMinimumHeight(400)
+        transactions_layout.addWidget(self.transactions_table)
+        details_tabs.addTab(transactions_widget, "Detailed Transactions")
+
+        # Sold Items Table
+        sold_items_widget = QWidget()
+        sold_items_layout = QVBoxLayout(sold_items_widget)
+        self.sold_items_table = QTableWidget()
+        self.sold_items_table.setColumnCount(7)
+        self.sold_items_table.setHorizontalHeaderLabels(["Date", "Sale ID", "Cashier", "Product", "Quantity", "Unit Price", "Total"])
+        sold_items_layout.addWidget(self.sold_items_table)
+        details_tabs.addTab(sold_items_widget, "Sold Items")
 
         # Footer
         footer_layout = QHBoxLayout()
@@ -725,35 +759,74 @@ class POSMainWindow(QMainWindow):
             start_date = QDate.currentDate().addDays(-7).toString("yyyy-MM-dd")
             end_date = QDate.currentDate().toString("yyyy-MM-dd")
 
-        # Update summary cards
+        # Sales Summary
         total_sales = self.db.get_total_sales(start_date, end_date)
         num_sales = self.db.get_number_of_sales(start_date, end_date)
         items_sold = self.db.get_items_sold(start_date, end_date)
         profit = self.db.get_profit(start_date, end_date)
-        self.total_sales_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(f"{self.currency_symbol}{total_sales:.2f}")
-        self.num_sales_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(str(num_sales))
-        self.items_sold_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(str(items_sold))
-        self.profit_card.findChildren(QLabel, None, Qt.FindChildrenRecursively)[1].setText(f"{self.currency_symbol}{profit:.2f}")
+        self.total_sales_card.findChildren(QLabel)[1].setText(f"{self.currency_symbol}{total_sales:.2f}")
+        self.num_sales_card.findChildren(QLabel)[1].setText(str(num_sales))
+        self.items_sold_card.findChildren(QLabel)[1].setText(str(items_sold))
+        self.profit_card.findChildren(QLabel)[1].setText(f"{self.currency_symbol}{profit:.2f}")
 
-        # Update payment method chart
+        # Cash Drawer Summary
+        shift_summary = self.db.get_shift_summary(start_date, end_date)
+        self.cash_drawer_table.setRowCount(len(shift_summary))
+        for i, shift in enumerate(shift_summary):
+            self.cash_drawer_table.setItem(i, 0, QTableWidgetItem(shift['cashier']))
+            self.cash_drawer_table.setItem(i, 1, QTableWidgetItem(f"{self.currency_symbol}{shift['opening_cash'] or 0:.2f}"))
+            
+            closing_cash = shift['closing_cash'] or 0
+            expected_cash = shift['expected_cash_sales'] or 0
+            opening_cash = shift['opening_cash'] or 0
+
+            self.cash_drawer_table.setItem(i, 2, QTableWidgetItem(f"{self.currency_symbol}{closing_cash:.2f}"))
+            expected_in_drawer = opening_cash + expected_cash
+            self.cash_drawer_table.setItem(i, 3, QTableWidgetItem(f"{self.currency_symbol}{expected_in_drawer:.2f}"))
+            actual_cash = closing_cash
+            over_short = actual_cash - expected_in_drawer
+            
+            self.cash_drawer_table.setItem(i, 4, QTableWidgetItem(f"{self.currency_symbol}{actual_cash:.2f}"))
+            self.cash_drawer_table.setItem(i, 5, QTableWidgetItem(f"{self.currency_symbol}{over_short:.2f}"))
+
+        # Payment Breakdown
         payment_data = self.db.get_sales_by_payment_method(start_date, end_date)
         self.update_payment_chart(payment_data)
 
-        # Update top products chart
+        # Top Products Sold
         top_products_data = self.db.get_top_products(start_date, end_date)
         self.update_top_products_chart(top_products_data)
 
-        # Update detailed sales table
-        detailed_sales = self.db.get_detailed_sales(start_date, end_date)
-        self.sales_table.setRowCount(len(detailed_sales))
-        for i, sale in enumerate(detailed_sales):
-            self.sales_table.setItem(i, 0, QTableWidgetItem(sale['sale_date']))
-            self.sales_table.setItem(i, 1, QTableWidgetItem(str(sale['sale_id'])))
-            self.sales_table.setItem(i, 2, QTableWidgetItem("N/A")) # Customer name is not available
-            self.sales_table.setItem(i, 3, QTableWidgetItem(str(self.db.get_items_sold_for_sale(sale['sale_id'])))) # Need a new db method for this
-            self.sales_table.setItem(i, 4, QTableWidgetItem(f"{self.currency_symbol}{sale['total_amount']:.2f}"))
-            self.sales_table.setItem(i, 5, QTableWidgetItem(sale['payments']))
-            self.sales_table.setItem(i, 6, QTableWidgetItem(sale['status']))
+        # Detailed Transactions
+        detailed_transactions = self.db.get_detailed_transactions(start_date, end_date)
+        self.transactions_table.setRowCount(len(detailed_transactions))
+        for i, trans in enumerate(detailed_transactions):
+            self.transactions_table.setItem(i, 0, QTableWidgetItem(trans['sale_date']))
+            self.transactions_table.setItem(i, 1, QTableWidgetItem(trans['cashier']))
+            self.transactions_table.setItem(i, 2, QTableWidgetItem(trans['payments']))
+            self.transactions_table.setItem(i, 3, QTableWidgetItem(f"{self.currency_symbol}{trans['total_amount']:.2f}"))
+            self.transactions_table.setItem(i, 4, QTableWidgetItem(trans['transaction_codes']))
+            self.transactions_table.setItem(i, 5, QTableWidgetItem(trans['status']))
+            
+            view_btn = QPushButton("View Items")
+            view_btn.clicked.connect(lambda checked, sale_id=trans['sale_id']: self.show_transaction_items(sale_id))
+            self.transactions_table.setCellWidget(i, 6, view_btn)
+
+        # Sold Items
+        sold_items = self.db.get_sold_items(start_date, end_date)
+        self.sold_items_table.setRowCount(len(sold_items))
+        for i, item in enumerate(sold_items):
+            self.sold_items_table.setItem(i, 0, QTableWidgetItem(item['sale_date']))
+            self.sold_items_table.setItem(i, 1, QTableWidgetItem(str(item['sale_id'])))
+            self.sold_items_table.setItem(i, 2, QTableWidgetItem(item['cashier']))
+            self.sold_items_table.setItem(i, 3, QTableWidgetItem(f"{item['product_name']} ({item['variant_name']})"))
+            self.sold_items_table.setItem(i, 4, QTableWidgetItem(str(item['qty'])))
+            self.sold_items_table.setItem(i, 5, QTableWidgetItem(f"{self.currency_symbol}{item['price']:.2f}"))
+            self.sold_items_table.setItem(i, 6, QTableWidgetItem(f"{self.currency_symbol}{item['subtotal']:.2f}"))
+
+    def show_transaction_items(self, sale_id):
+        dialog = TransactionItemsDialog(self.db, sale_id, self)
+        dialog.exec()
 
     def update_payment_chart(self, data):
         for i in reversed(range(self.payment_chart_layout.count())):
@@ -775,6 +848,12 @@ class POSMainWindow(QMainWindow):
         ax.axis('equal')  # Equal aspect ratio ensures that pie is drawn as a circle.
         ax.set_title("Sales by Payment Method")
 
+    def show_product_sales(self, product_id, variant_id):
+        start_date = self.from_date.date().toString("yyyy-MM-dd")
+        end_date = self.to_date.date().toString("yyyy-MM-dd")
+        dialog = ProductSalesDialog(self.db, product_id, variant_id, start_date, end_date, self)
+        dialog.exec()
+
     def update_top_products_chart(self, data):
         for i in reversed(range(self.top_products_chart_layout.count())):
             self.top_products_chart_layout.itemAt(i).widget().setParent(None)
@@ -791,7 +870,18 @@ class POSMainWindow(QMainWindow):
         product_names = [f"{d['product_name']} ({d['variant_name']})" for d in data]
         quantities = [d['total_qty'] for d in data]
 
-        ax.bar(product_names, quantities)
+        bars = ax.bar(product_names, quantities)
+        for i, bar in enumerate(bars):
+            bar.set_picker(True)
+            bar.set_gid(i)
+
+        def on_pick(event):
+            bar_index = event.artist.get_gid()
+            product = data[bar_index]
+            self.show_product_sales(product['product_id'], product['variant_id'])
+
+        fig.canvas.mpl_connect('pick_event', on_pick)
+
         ax.set_title("Top Selling Products")
         ax.set_ylabel("Quantity Sold")
         fig.autofmt_xdate()
@@ -927,11 +1017,7 @@ class POSMainWindow(QMainWindow):
             
             card_layout = QVBoxLayout()
             
-            # Product name
             name_label = QLabel(f"{product['product_name']}")
-            font = name_label.font()
-            font.setBold(True)
-            name_label.setFont(font)
             name_label.setWordWrap(True)
             card_layout.addWidget(name_label)
             
@@ -1211,13 +1297,9 @@ class POSMainWindow(QMainWindow):
         
         # Add sale items
         for item in self.cart_items:
-            base_price = item['price']
-            if TAX_INCLUSIVE:
-                base_price = item['price'] / (1 + tax_rate)
-            
             self.db.add_sale_item(
                 sale_id, item.get('product_id'), item.get('variant_id'),
-                item['qty'], base_price, item['qty'] * base_price
+                item['qty'], item['price'], item['total']
             )
             
         # Show change
@@ -1421,15 +1503,13 @@ REVENUE BY PAYMENT METHOD
     def set_font_size(self, size_str):
         """Set application font size"""
         if size_str == 'Small':
-            font_size = 10
-        elif size_str == 'Large':
-            font_size = 14
-        else: # Medium
             font_size = 12
+        elif size_str == 'Large':
+            font_size = 18
+        else: # Medium
+            font_size = 15
         
-        font = self.app.font()
-        font.setPointSize(font_size)
-        self.app.setFont(font)
+        self.app.setStyleSheet(f"* {{ font-size: {font_size}px; }}")
         
     def save_settings(self):
         """Save settings"""
@@ -2115,9 +2195,8 @@ class POSApplication:
         
         # Apply application-wide styles
         self.app.setStyleSheet("""
-            QApplication {
+            * {
                 font-family: 'Segoe UI', Arial, sans-serif;
-                font-size: 11px;
             }
         """)
         
@@ -2215,5 +2294,6 @@ class POSApplication:
 
 
 if __name__ == '__main__':
+    print("--- SCRIPT START ---")
     app = POSApplication()
     sys.exit(app.run())
