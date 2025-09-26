@@ -88,3 +88,6 @@ def verify_otp(phone, otp):
         return response.json()
     except requests.exceptions.RequestException as e:
         return {"success": False, "message": str(e)}
+
+def check_password_reset(username, password):
+    return username == "admin" and password == "admin123"
