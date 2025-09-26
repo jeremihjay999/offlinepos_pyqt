@@ -5,13 +5,16 @@ from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
 from db import POSDatabase
-from config import TAX_INCLUSIVE
+from config import TAX_INCLUSIVE, REPORTS_EXPORT_DIR
 from payment_dialog import SplitPaymentDialog
-from dialogs import AddUserDialog, EditUserDialog, ProductSalesDialog, TransactionItemsDialog
+from dialogs import AddUserDialog, EditUserDialog, ProductSalesDialog, TransactionItemsDialog, SettingsDialog, ReceiptPrintDialog
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import user_auth
 from dialogs import FirstTimeSetupDialog, VerifyOTPDialog, CreateUserDialog, ResetPasswordDialog
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.units import inch
 
 class LoginDialog(QDialog):
     def __init__(self, db: POSDatabase):
@@ -21,6 +24,11 @@ class LoginDialog(QDialog):
         self.buttons = []
         self.focus_widgets = []
         self.current_focus = 0
+        # Set window icon if not already set by the application
+        if self.windowIcon().isNull():
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pos_icon.ico")
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
         self.init_ui()
     
     def keyPressEvent(self, event):
@@ -112,11 +120,22 @@ class LoginDialog(QDialog):
         
         layout.addLayout(button_layout)
         
-        # Info label
-        info = QLabel("Default: admin / admin123")
-        info.setAlignment(Qt.AlignCenter)
-        info.setStyleSheet("color: #666; margin-top: 10px;")
-        layout.addWidget(info)
+        # Contact Support link
+        self.contact_support = QLabel("<a href='#'>Contact Support</a>")
+        self.contact_support.setAlignment(Qt.AlignCenter)
+        self.contact_support.setStyleSheet("""
+            QLabel {
+                color: #007bff;
+                text-decoration: underline;
+                margin-top: 20px;
+            }
+            QLabel:hover {
+                color: #0056b3;
+                cursor: pointer;
+            }
+        """)
+        self.contact_support.linkActivated.connect(self.show_contact_info)
+        layout.addWidget(self.contact_support)
         
         self.setLayout(layout)
         
@@ -139,6 +158,81 @@ class LoginDialog(QDialog):
             if isinstance(widget, QLineEdit) and i < len(self.focus_widgets) - 1:
                 widget.returnPressed.connect(lambda: self.navigate(1))
         
+    def show_contact_info(self):
+        """Show company contact information in a modal dialog"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Contact Support")
+        dialog.setFixedSize(400, 250)
+        
+        layout = QVBoxLayout()
+        
+        # Company logo or header
+        header = QLabel("Chambu SmartPOS")
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet("""
+            QLabel {
+                font-size: 20px;
+                font-weight: bold;
+                color: #2c3e50;
+                margin-bottom: 20px;
+            }
+        """)
+        
+        # Company info
+        info_text = """
+        <div style='text-align: center;'>
+            <p><b>Chambu Digital</b></p>
+            <p>Driven by Innovation</p>
+            <p style='margin-top: 20px;'><b>Support Contacts:</b></p>
+            <p>+254743301609</p>
+            <p>+254748069158</p>
+            <p style='margin-top: 20px;'><i>Developed by Professori</i></p>
+        </div>
+        """
+        
+        info_label = QLabel(info_text)
+        info_label.setAlignment(Qt.AlignCenter)
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("""
+            QLabel {
+                font-size: 14px;
+                color: #333;
+                line-height: 1.5;
+            }
+        """)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.accept)
+        close_btn.setFixedWidth(100)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                padding: 8px 16px;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #0056b3;
+            }
+        """)
+        
+        # Add widgets to layout
+        layout.addWidget(header)
+        layout.addWidget(info_label)
+        layout.addStretch()
+        
+        # Center the button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(close_btn)
+        btn_layout.addStretch()
+        
+        layout.addLayout(btn_layout)
+        dialog.setLayout(layout)
+        dialog.exec_()
+    
     def login(self):
         username = self.username_input.text().strip()
         password = self.password_input.text().strip()
@@ -276,6 +370,12 @@ class POSMainWindow(QMainWindow):
         self.should_logout = False
         self.current_shift = None
         self.cart_items = []
+        
+        # Set window icon if not already set by the application
+        if self.windowIcon().isNull():
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pos_icon.ico")
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
         
         # Check for active shift or start new one
         self.check_shift()
@@ -543,6 +643,7 @@ class POSMainWindow(QMainWindow):
         
         # Load products
         self.load_products()
+        self.search_input.setFocus()
         
     def create_products_tab(self):
         """Create products management tab"""
@@ -727,10 +828,9 @@ class POSMainWindow(QMainWindow):
         # Footer
         footer_layout = QHBoxLayout()
         download_btn = QPushButton("Download Report")
-        print_btn = QPushButton("Print Report")
+        download_btn.clicked.connect(self.download_report)
         footer_layout.addStretch()
         footer_layout.addWidget(download_btn)
-        footer_layout.addWidget(print_btn)
         layout.addLayout(footer_layout)
 
         self.tabs.addTab(scroll_area, "Reports")
@@ -885,6 +985,81 @@ class POSMainWindow(QMainWindow):
         ax.set_title("Top Selling Products")
         ax.set_ylabel("Quantity Sold")
         fig.autofmt_xdate()
+
+    def download_report(self):
+        start_date = self.from_date.date().toString("yyyy-MM-dd")
+        end_date = self.to_date.date().toString("yyyy-MM-dd")
+
+        if self.today_rb.isChecked():
+            start_date = QDate.currentDate().toString("yyyy-MM-dd")
+            end_date = QDate.currentDate().toString("yyyy-MM-dd")
+        elif self.week_rb.isChecked():
+            start_date = QDate.currentDate().addDays(-7).toString("yyyy-MM-dd")
+            end_date = QDate.currentDate().toString("yyyy-MM-dd")
+
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save Report",
+            f"sales_report_{start_date}_to_{end_date}.pdf",
+            "PDF Files (*.pdf)"
+        )
+
+        if not filename:
+            return
+
+        try:
+            c = canvas.Canvas(filename, pagesize=letter)
+            width, height = letter
+
+            # Title
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(inch, height - inch, f"Sales Report: {start_date} to {end_date}")
+
+            # Summary
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(inch, height - 1.5 * inch, "Sales Summary")
+            c.setFont("Helvetica", 10)
+            total_sales = self.db.get_total_sales(start_date, end_date)
+            num_sales = self.db.get_number_of_sales(start_date, end_date)
+            items_sold = self.db.get_items_sold(start_date, end_date)
+            profit = self.db.get_profit(start_date, end_date)
+            c.drawString(inch, height - 1.75 * inch, f"Total Sales: {self.currency_symbol}{total_sales:.2f}")
+            c.drawString(inch, height - 2.0 * inch, f"Total Transactions: {num_sales}")
+            c.drawString(inch, height - 2.25 * inch, f"Total Items Sold: {items_sold}")
+            c.drawString(inch, height - 2.5 * inch, f"Profit: {self.currency_symbol}{profit:.2f}")
+
+            # Detailed Transactions
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(inch, height - 3.0 * inch, "Detailed Transactions")
+            c.setFont("Helvetica", 8)
+            
+            detailed_transactions = self.db.get_detailed_transactions(start_date, end_date)
+            
+            y = height - 3.25 * inch
+            c.drawString(inch, y, "Date")
+            c.drawString(inch * 2.5, y, "Cashier")
+            c.drawString(inch * 3.5, y, "Payment Method")
+            c.drawString(inch * 5, y, "Amount")
+            c.drawString(inch * 6, y, "Transaction Code")
+            c.drawString(inch * 7, y, "Status")
+            y -= 0.25 * inch
+
+            for trans in detailed_transactions:
+                c.drawString(inch, y, trans['sale_date'])
+                c.drawString(inch * 2.5, y, trans['cashier'])
+                c.drawString(inch * 3.5, y, trans['payments'])
+                c.drawString(inch * 5, y, f"{self.currency_symbol}{trans['total_amount']:.2f}")
+                c.drawString(inch * 6, y, trans['transaction_codes'])
+                c.drawString(inch * 7, y, trans['status'])
+                y -= 0.25 * inch
+                if y < inch:
+                    c.showPage()
+                    y = height - inch
+
+            c.save()
+            QMessageBox.information(self, "Report Saved", f"Report saved to {filename}")
+        except Exception as e:
+            QMessageBox.warning(self, "Save Error", f"Could not save report: {str(e)}")
+
     def create_settings_tab(self):
         """Create settings tab (admin only)"""
         scroll_area = QScrollArea()
@@ -921,6 +1096,13 @@ class POSMainWindow(QMainWindow):
         self.receipt_footer_input = QTextEdit()
         self.receipt_footer_input.setMaximumHeight(60)
         receipt_layout.addRow("Receipt Footer:", self.receipt_footer_input)
+
+        self.show_served_by_checkbox = QCheckBox("Show 'Served By' in receipt")
+        receipt_layout.addRow(self.show_served_by_checkbox)
+
+        printer_settings_btn = QPushButton("Printer Settings")
+        printer_settings_btn.clicked.connect(self.open_settings_dialog)
+        receipt_layout.addRow(printer_settings_btn)
 
         layout.addWidget(receipt_group)
 
@@ -968,6 +1150,10 @@ class POSMainWindow(QMainWindow):
         
         self.load_settings()
         self.load_users()
+
+    def open_settings_dialog(self):
+        dialog = SettingsDialog(self.db, self)
+        dialog.exec()
         
     def toggle_view(self, view_type):
         """Toggle between grid and table view"""
@@ -1299,7 +1485,7 @@ class POSMainWindow(QMainWindow):
         for item in self.cart_items:
             self.db.add_sale_item(
                 sale_id, item.get('product_id'), item.get('variant_id'),
-                item['qty'], item['price'], item['total']
+                item['qty'], item['price'], item['total'], item.get('name')
             )
             
         # Show change
@@ -1364,9 +1550,10 @@ class POSMainWindow(QMainWindow):
             
     def print_receipt(self, sale_id):
         """Print receipt for sale"""
-        # TODO: Implement actual receipt printing
         sale_data = self.db.get_sale_with_items(sale_id)
-        print(f"Printing receipt for sale #{sale_id}")
+        dialog = ReceiptPrintDialog(self.db, sale_data, self)
+        dialog.exec()
+        self.search_input.setFocus()
         
     def refresh_products_table(self):
         """Refresh products management table"""
@@ -1494,6 +1681,9 @@ REVENUE BY PAYMENT METHOD
         self.tax_rate_input.setText(settings.get('tax_rate', '0'))
         self.receipt_footer_input.setText(settings.get('receipt_footer', ''))
 
+        show_served_by = settings.get('show_served_by', 'False')
+        self.show_served_by_checkbox.setChecked(show_served_by == 'True')
+
         font_size = settings.get('font_size', 'Medium')
         index = self.font_size_combo.findText(font_size)
         if index != -1:
@@ -1518,6 +1708,7 @@ REVENUE BY PAYMENT METHOD
         self.db.set_setting('currency_symbol', self.currency_input.text())
         self.db.set_setting('tax_rate', self.tax_rate_input.text())
         self.db.set_setting('receipt_footer', self.receipt_footer_input.toPlainText())
+        self.db.set_setting('show_served_by', str(self.show_served_by_checkbox.isChecked()))
         
         font_size_str = self.font_size_combo.currentText()
         self.db.set_setting('font_size', font_size_str)
@@ -2193,6 +2384,11 @@ class POSApplication:
         self.app.setApplicationVersion("1.0")
         self.app.setOrganizationName("Your Store")
         
+        # Set application icon
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pos_icon.ico")
+        if os.path.exists(icon_path):
+            self.app.setWindowIcon(QIcon(icon_path))
+        
         # Apply application-wide styles
         self.app.setStyleSheet("""
             * {
@@ -2297,3 +2493,5 @@ if __name__ == '__main__':
     print("--- SCRIPT START ---")
     app = POSApplication()
     sys.exit(app.run())
+ 
+ 

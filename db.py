@@ -698,12 +698,12 @@ class POSDatabase:
             conn.commit()
     
     def add_sale_item(self, sale_id: int, product_id: int, variant_id: int, 
-                     qty: int, price: float, subtotal: float):
+                     qty: int, price: float, subtotal: float, name: str = None):
         """Add item to sale"""
         with self.get_connection() as conn:
             conn.execute(
-                "INSERT INTO sale_items (sale_id, product_id, variant_id, qty, price, subtotal) VALUES (?, ?, ?, ?, ?, ?)",
-                (sale_id, product_id, variant_id, qty, price, subtotal)
+                "INSERT INTO sale_items (sale_id, product_id, variant_id, qty, price, subtotal, name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (sale_id, product_id, variant_id, qty, price, subtotal, name)
             )
             # Update stock
             if variant_id:
@@ -723,12 +723,12 @@ class POSDatabase:
             items_query = '''
                 SELECT 
                     si.qty, si.price, si.subtotal,
-                    p.name as product_name, 
+                    COALESCE(p.name, si.name) as product_name, 
                     b.name as brand_name,
                     v.name as variant_name
                 FROM sale_items si
-                JOIN products p ON si.product_id = p.id
-                JOIN variants v ON si.variant_id = v.id
+                LEFT JOIN products p ON si.product_id = p.id
+                LEFT JOIN variants v ON si.variant_id = v.id
                 LEFT JOIN brands b ON p.brand_id = b.id
                 WHERE si.sale_id = ?
             '''
@@ -924,17 +924,17 @@ class POSDatabase:
                     s.created_at as sale_date,
                     s.id as sale_id,
                     u.username as cashier,
-                    p.name as product_name,
+                    COALESCE(p.name, si.name) as product_name,
                     v.name as variant_name,
                     si.qty,
                     si.price,
                     si.subtotal
                 FROM sale_items si
-                JOIN sales s ON si.sale_id = s.id
-                JOIN shifts sh ON s.shift_id = sh.id
-                JOIN users u ON sh.user_id = u.id
-                JOIN products p ON si.product_id = p.id
-                JOIN variants v ON si.variant_id = v.id
+                LEFT JOIN sales s ON si.sale_id = s.id
+                LEFT JOIN shifts sh ON s.shift_id = sh.id
+                LEFT JOIN users u ON sh.user_id = u.id
+                LEFT JOIN products p ON si.product_id = p.id
+                LEFT JOIN variants v ON si.variant_id = v.id
                 WHERE DATE(s.created_at) BETWEEN ? AND ?
                 ORDER BY s.id DESC, p.name
             """

@@ -1,10 +1,70 @@
+import os
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
+from PySide6.QtPrintSupport import QPrinterInfo, QPrinter, QPrintDialog
 from db import POSDatabase
 from decimal import Decimal, InvalidOperation
 
-class ProductSalesDialog(QDialog):
+class BaseDialog(QDialog):
+    """Base dialog class that sets up common functionality including icons."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # Set window icon if not already set by the application
+        if self.windowIcon().isNull():
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pos_icon.ico")
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
+
+class SettingsDialog(BaseDialog):
+    def __init__(self, db: POSDatabase, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("Settings")
+        self.setMinimumWidth(500)
+
+        layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+
+        self.printer_combo = QComboBox()
+        self.printer_combo.addItems(self.get_available_printers())
+        form_layout.addRow("Receipt Printer:", self.printer_combo)
+
+        self.paper_size_combo = QComboBox()
+        self.paper_size_combo.addItems(["58mm", "80mm"])
+        form_layout.addRow("Receipt Paper Size:", self.paper_size_combo)
+
+        layout.addLayout(form_layout)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.save_settings)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        self.load_settings()
+
+    def get_available_printers(self):
+        return [printer.printerName() for printer in QPrinterInfo.availablePrinters()]
+
+    def load_settings(self):
+        printer_name = self.db.get_setting('printer_name')
+        if printer_name:
+            self.printer_combo.setCurrentText(printer_name)
+
+        paper_size = self.db.get_setting('receipt_width')
+        if paper_size:
+            self.paper_size_combo.setCurrentText(f"{paper_size}mm")
+
+    def save_settings(self):
+        printer_name = self.printer_combo.currentText()
+        paper_size = self.paper_size_combo.currentText().replace("mm", "")
+
+        self.db.set_setting('printer_name', printer_name)
+        self.db.set_setting('receipt_width', paper_size)
+
+        self.accept()
+
+class ProductSalesDialog(BaseDialog):
     def __init__(self, db: POSDatabase, product_id: int, variant_id: int, start_date: str, end_date: str, parent=None):
         super().__init__(parent)
         self.db = db
@@ -32,7 +92,7 @@ class ProductSalesDialog(QDialog):
             self.table.setItem(i, 2, QTableWidgetItem(f"{self.parent().currency_symbol}{sale['price']:.2f}"))
             self.table.setItem(i, 3, QTableWidgetItem(f"{self.parent().currency_symbol}{sale['subtotal']:.2f}"))
 
-class TransactionItemsDialog(QDialog):
+class TransactionItemsDialog(BaseDialog):
     def __init__(self, db: POSDatabase, sale_id: int, parent=None):
         super().__init__(parent)
         self.db = db
@@ -55,7 +115,10 @@ class TransactionItemsDialog(QDialog):
         
         self.table.setRowCount(len(items))
         for i, item in enumerate(items):
-            product_name = f"{item['product_name']} ({item['variant_name']})"
+            if item['variant_name']:
+                product_name = f"{item['product_name']} ({item['variant_name']})"
+            else:
+                product_name = item['product_name']
             net_price = item['price']
             qty = item['qty']
             
@@ -68,7 +131,7 @@ class TransactionItemsDialog(QDialog):
             self.table.setItem(i, 3, QTableWidgetItem(f"{self.parent().currency_symbol}{vat_amount:.2f}"))
             self.table.setItem(i, 4, QTableWidgetItem(f"{self.parent().currency_symbol}{gross_price:.2f}"))
 
-class AddSupplierDialog(QDialog):
+class AddSupplierDialog(BaseDialog):
     def __init__(self, db: POSDatabase, parent=None):
         super().__init__(parent)
         self.db = db
@@ -136,7 +199,7 @@ class AddSupplierDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to add supplier: {str(e)}")
 
-class AddProductDialog(QDialog):
+class AddProductDialog(BaseDialog):
     def __init__(self, db: POSDatabase, parent=None):
         super().__init__(parent)
         self.db = db
@@ -322,7 +385,7 @@ class AddProductDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to add product: {str(e)}")
 
-class EditProductDialog(QDialog):
+class EditProductDialog(BaseDialog):
     def __init__(self, db: POSDatabase, product_data: dict, parent=None):
         super().__init__(parent)
         self.db = db
@@ -414,7 +477,7 @@ class EditProductDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to update product: {str(e)}")
 
-class ReceiptPrintDialog(QDialog):
+class ReceiptPrintDialog(BaseDialog):
     def __init__(self, db: POSDatabase, sale_data: dict, parent=None):
         super().__init__(parent)
         self.db = db
@@ -460,7 +523,9 @@ class ReceiptPrintDialog(QDialog):
         sale = self.sale_data['sale']
         items = self.sale_data['items']
         payments = self.sale_data['payments']
-        
+        currency_symbol = settings.get('currency_symbol', '$')
+        show_served_by = settings.get('show_served_by', 'False') == 'True'
+
         receipt_text = f"""
 {settings.get('store_name', 'POS System').center(32)}
 {settings.get('store_address', '').center(32)}
@@ -468,8 +533,11 @@ class ReceiptPrintDialog(QDialog):
 
 Receipt #: {sale['id']}
 Date: {sale['created_at'][:19]}
-Cashier: [Current User]
+"""
+        if show_served_by:
+            receipt_text += f"Cashier: {self.parent().user['username']}\n"
 
+        receipt_text += f"""
 {'=' * 32}
 {'ITEM':<20} {'QTY':<4} {'TOTAL':<7}
 {'=' * 32}
@@ -480,14 +548,14 @@ Cashier: [Current User]
             if len(item_name) > 20:
                 item_name = item_name[:17] + "..."
             
-            receipt_text += f"{item_name:<20} {item['qty']:<4} ${item['subtotal']:<6.2f}\n"
+            receipt_text += f"{item_name:<20} {item['qty']:<4} {currency_symbol}{item['subtotal']:<6.2f}\n"
             
         receipt_text += f"""
 {'=' * 32}
-{'Subtotal:':<25} ${sale['total'] - sale['tax_amount']:<6.2f}
-{'Tax:':<25} ${sale['tax_amount']:<6.2f}
-{'Discount:':<25} ${sale['discount_amount']:<6.2f}
-{'TOTAL:':<25} ${sale['total']:<6.2f}
+{'Subtotal:':<25} {currency_symbol}{sale['total'] - sale['tax_amount']:<6.2f}
+{'Tax:':<25} {currency_symbol}{sale['tax_amount']:<6.2f}
+{'Discount:':<25} {currency_symbol}{sale['discount_amount']:<6.2f}
+{'TOTAL:':<25} {currency_symbol}{sale['total']:<6.2f}
 {'=' * 32}
 
 Payments:
@@ -496,19 +564,19 @@ Payments:
         total_paid = 0
         for payment in payments:
             total_paid += payment['amount']
-            payment_line = f"    {payment['method'].title()}: ${payment['amount']:.2f}"
+            payment_line = f"    {payment['method'].title()}: {currency_symbol}{payment['amount']:.2f}"
             if payment.get('transaction_reference'):
                 payment_line += f" (Ref: {payment['transaction_reference']})"
             receipt_text += payment_line + "\n"
 
-        receipt_text += f"\nTotal Paid: ${total_paid:.2f}\n"
+        receipt_text += f"\nTotal Paid: {currency_symbol}{total_paid:.2f}\n"
 
         if any(p['method'] == 'Cash' for p in payments):
             cash_paid = sum(p['amount'] for p in payments if p['method'] == 'Cash')
             change = cash_paid - sale['total']
             if change < 0:
                 change = 0
-            receipt_text += f"Change: ${change:.2f}\n"
+            receipt_text += f"Change: {currency_symbol}{change:.2f}\n"
 
         receipt_text += f"""
 {settings.get('receipt_footer', 'Thank you!').center(32)}
@@ -526,14 +594,23 @@ Payments:
             document.setPlainText(self.receipt_preview.toPlainText())
             
             printer = QPrinter()
-            printer.setPrinterName("Default")  # Use default printer
-            printer.setPaperSize(QPrinter.Custom)
+            printer_name = self.db.get_setting('printer_name')
+            if printer_name:
+                printer.setPrinterName(printer_name)
+
+            paper_width_str = self.db.get_setting('receipt_width')
+            paper_width = int(paper_width_str) if paper_width_str else 80
+
+            page_layout = QPageLayout()
+            page_size = QPageSize(QSizeF(paper_width, 297), QPageSize.Unit.Millimeter)
+            page_layout.setPageSize(page_size)
+            page_layout.setOrientation(QPageLayout.Orientation.Portrait)
+            printer.setPageLayout(page_layout)
             
-            # Print dialog
-            print_dialog = QPrintDialog(printer, self)
-            if print_dialog.exec() == QPrintDialog.Accepted:
-                document.print_(printer)
-                QMessageBox.information(self, "Print", "Receipt sent to printer!")
+            document.print_(printer)
+            QMessageBox.information(self, "Print", "Receipt sent to printer!")
+            self.accept()
+            self.accept()
                 
         except Exception as e:
             QMessageBox.warning(self, "Print Error", f"Could not print receipt: {str(e)}")
@@ -571,7 +648,7 @@ Payments:
         except Exception as e:
             QMessageBox.critical(self, "PDF Error", f"Could not save PDF: {str(e)}")
 
-class EndOfDayDialog(QDialog):
+class EndOfDayDialog(BaseDialog):
     def __init__(self, db: POSDatabase, shift_data: dict, parent=None):
         super().__init__(parent)
         self.db = db
@@ -662,7 +739,7 @@ Generated: {QDateTime.currentDateTime().toString('yyyy-MM-dd hh:mm:ss')}
         
         self.report_text.setText(report_text)
 
-class AddUserDialog(QDialog):
+class AddUserDialog(BaseDialog):
     def __init__(self, db: POSDatabase, parent=None):
         super().__init__(parent)
         self.db = db
@@ -742,7 +819,7 @@ class AddUserDialog(QDialog):
         else:
             QMessageBox.warning(self, "Error", "Username already exists!")
 
-class EditUserDialog(QDialog):
+class EditUserDialog(BaseDialog):
     def __init__(self, db: POSDatabase, user: dict, parent=None):
         super().__init__(parent)
         self.db = db
@@ -826,7 +903,7 @@ class EditUserDialog(QDialog):
             else:
                 QMessageBox.warning(self, "Error", "Failed to reset password.")
 
-class FirstTimeSetupDialog(QDialog):
+class FirstTimeSetupDialog(BaseDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("First-Time Setup")
@@ -864,7 +941,7 @@ class FirstTimeSetupDialog(QDialog):
         return self.name_input.text().strip(), self.phone_input.text().strip()
 
 
-class VerifyOTPDialog(QDialog):
+class VerifyOTPDialog(BaseDialog):
     def __init__(self, phone_number, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Verify OTP")
@@ -901,7 +978,7 @@ class VerifyOTPDialog(QDialog):
         return self.otp_input.text().strip()
 
 
-class CreateUserDialog(QDialog):
+class CreateUserDialog(BaseDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Create User")
@@ -952,7 +1029,7 @@ class CreateUserDialog(QDialog):
         return username, password
 
 
-class ResetPasswordDialog(QDialog):
+class ResetPasswordDialog(BaseDialog):
     def __init__(self, phone_number, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Reset Password")

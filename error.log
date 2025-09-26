@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "C:\Users\Jeremy Jay\Desktop\offlinepos\main.py", line 10, in <module>
+    from dialogs import AddUserDialog, EditUserDialog, ProductSalesDialog, TransactionItemsDialog, SettingsDialog
+  File "C:\Users\Jeremy Jay\Desktop\offlinepos\dialogs.py", line 9, in <module>
+    class SettingsDialog(BaseDialog):
+                         ^^^^^^^^^^
+NameError: name 'BaseDialog' is not defined
