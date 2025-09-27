@@ -5,9 +5,36 @@ import json
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
+def check_and_update_schema(conn):
+    """
+    Checks and updates the database schema to ensure all required columns exist.
+    """
+    schema = {
+        "sale_items": [
+            ("name", "TEXT"),
+        ]
+    }
+
+    cursor = conn.cursor()
+
+    for table, columns in schema.items():
+        cursor.execute(f"PRAGMA table_info({table})")
+        existing_columns = [row[1] for row in cursor.fetchall()]
+
+        for column_name, column_type in columns:
+            if column_name not in existing_columns:
+                try:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column_name} {column_type}")
+                    print(f"Added column '{column_name}' to table '{table}'.")
+                except sqlite3.OperationalError as e:
+                    print(f"Failed to add column '{column_name}' to table '{table}': {e}")
+    conn.commit()
+
 class POSDatabase:
     def __init__(self, db_path: str = "pos_system.db"):
         self.db_path = db_path
+        with self.get_connection() as conn:
+            check_and_update_schema(conn)
     
     def get_connection(self):
         """Get database connection with foreign key support"""
@@ -149,6 +176,7 @@ class POSDatabase:
                     sale_id INTEGER NOT NULL,
                     product_id INTEGER,
                     variant_id INTEGER,
+                    name TEXT,
                     qty INTEGER NOT NULL,
                     price DECIMAL(10,2) NOT NULL,
                     subtotal DECIMAL(10,2) NOT NULL,
@@ -924,7 +952,7 @@ class POSDatabase:
                     s.created_at as sale_date,
                     s.id as sale_id,
                     u.username as cashier,
-                    COALESCE(p.name, si.name) as product_name,
+                    CASE WHEN p.name IS NOT NULL THEN p.name ELSE si.name END as product_name,
                     v.name as variant_name,
                     si.qty,
                     si.price,

@@ -7,7 +7,7 @@ from PySide6.QtGui import *
 from db import POSDatabase
 from config import TAX_INCLUSIVE, REPORTS_EXPORT_DIR
 from payment_dialog import SplitPaymentDialog
-from dialogs import AddUserDialog, EditUserDialog, ProductSalesDialog, TransactionItemsDialog, SettingsDialog, ReceiptPrintDialog
+from dialogs import AddUserDialog, EditUserDialog, ProductSalesDialog, TransactionItemsDialog, SettingsDialog, ReceiptPrintDialog, EndOfDayDialog
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import user_auth
@@ -730,6 +730,11 @@ class POSMainWindow(QMainWindow):
         header_label = QLabel(f"{store_name} Reports Dashboard")
         header_layout.addWidget(header_label)
         header_layout.addStretch()
+
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self.update_reports)
+        header_layout.addWidget(refresh_button)
+
         layout.addLayout(header_layout)
 
         # Date Range Selector

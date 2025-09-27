@@ -8,6 +8,13 @@ def inspect_db():
     print("Tables in the database:")
     for table in tables:
         print(table[0])
+
+    print("\nSchema for sale_items table:")
+    cursor.execute("PRAGMA table_info(sale_items)")
+    columns = cursor.fetchall()
+    for column in columns:
+        print(column)
+
     conn.close()
 
 if __name__ == "__main__":
