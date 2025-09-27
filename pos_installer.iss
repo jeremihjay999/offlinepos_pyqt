@@ -40,8 +40,12 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-; Add the program to Windows Startup if selected
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Removed auto-launch to avoid permission issues
+; Users can launch the application from the Start Menu or Desktop shortcut
+
+[CustomMessages]
+FinishedInstallTitle=Installation Complete
+FinishedInstallMessage=The {#MyAppName} has been successfully installed on your computer.%n%nYou can now launch the application from the Start Menu or Desktop shortcut.
 
 [Registry]
 ; Add to Windows startup if selected
@@ -72,5 +76,8 @@ begin
     begin
       PinToTaskbar();
     end;
+    
+    // Show custom success message
+    MsgBox(ExpandConstant('{cm:FinishedInstallMessage}'), mbInformation, MB_OK);
   end;
 end;
