@@ -840,15 +840,32 @@ class POSDatabase:
             result = conn.execute(query, (start_date, end_date)).fetchone()
             return result[0] or 0
 
-    def get_profit(self, start_date: str, end_date: str) -> float:
+    def get_total_tax(self, start_date: str, end_date: str) -> float:
         with self.get_connection() as conn:
-            query = """
-                SELECT SUM(si.subtotal - (v.purchase_price * si.qty))
-                FROM sale_items si
-                JOIN variants v ON si.variant_id = v.id
-                JOIN sales s ON si.sale_id = s.id
-                WHERE v.purchase_price IS NOT NULL AND DATE(s.created_at) BETWEEN ? AND ?
-            """
+            query = "SELECT SUM(tax_amount) FROM sales WHERE DATE(created_at) BETWEEN ? AND ?"
+            result = conn.execute(query, (start_date, end_date)).fetchone()
+            return result[0] or 0
+
+    def get_profit(self, start_date: str, end_date: str, include_tax: bool = False) -> float:
+        with self.get_connection() as conn:
+            if include_tax:
+                # Profit including tax (Sales with tax - Cost of Goods)
+                query = """
+                    SELECT SUM(si.subtotal + s.tax_amount - (v.purchase_price * si.qty))
+                    FROM sale_items si
+                    JOIN variants v ON si.variant_id = v.id
+                    JOIN sales s ON si.sale_id = s.id
+                    WHERE v.purchase_price IS NOT NULL AND DATE(s.created_at) BETWEEN ? AND ?
+                """
+            else:
+                # Profit excluding tax (Sales without tax - Cost of Goods)
+                query = """
+                    SELECT SUM(si.subtotal - (v.purchase_price * si.qty))
+                    FROM sale_items si
+                    JOIN variants v ON si.variant_id = v.id
+                    JOIN sales s ON si.sale_id = s.id
+                    WHERE v.purchase_price IS NOT NULL AND DATE(s.created_at) BETWEEN ? AND ?
+                """
             result = conn.execute(query, (start_date, end_date)).fetchone()
             return result[0] or 0
 

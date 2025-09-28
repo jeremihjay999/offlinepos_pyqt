@@ -772,10 +772,12 @@ class POSMainWindow(QMainWindow):
         self.num_sales_card = self.create_summary_card("Total Transactions", "0")
         self.items_sold_card = self.create_summary_card("Total Items Sold", "0")
         self.profit_card = self.create_summary_card("Profit", "0.00")
+        self.total_tax_card = self.create_summary_card("Total Tax", "0.00")
         summary_layout.addWidget(self.total_sales_card)
         summary_layout.addWidget(self.num_sales_card)
         summary_layout.addWidget(self.items_sold_card)
         summary_layout.addWidget(self.profit_card)
+        summary_layout.addWidget(self.total_tax_card)
         reports_content_layout.addWidget(summary_group)
 
         # Cash Drawer Summary
@@ -868,11 +870,20 @@ class POSMainWindow(QMainWindow):
         total_sales = self.db.get_total_sales(start_date, end_date)
         num_sales = self.db.get_number_of_sales(start_date, end_date)
         items_sold = self.db.get_items_sold(start_date, end_date)
-        profit = self.db.get_profit(start_date, end_date)
+        
+        profit_includes_tax = self.db.get_setting('profit_includes_tax') == 'True'
+        profit = self.db.get_profit(start_date, end_date, profit_includes_tax)
+        
+        total_tax = self.db.get_total_tax(start_date, end_date)
+
         self.total_sales_card.findChildren(QLabel)[1].setText(f"{self.currency_symbol}{total_sales:.2f}")
         self.num_sales_card.findChildren(QLabel)[1].setText(str(num_sales))
         self.items_sold_card.findChildren(QLabel)[1].setText(str(items_sold))
         self.profit_card.findChildren(QLabel)[1].setText(f"{self.currency_symbol}{profit:.2f}")
+        self.total_tax_card.findChildren(QLabel)[1].setText(f"{self.currency_symbol}{total_tax:.2f}")
+
+        show_total_tax_card = self.db.get_setting('show_total_tax_card') == 'True'
+        self.total_tax_card.setVisible(show_total_tax_card)
 
         # Cash Drawer Summary
         shift_summary = self.db.get_shift_summary(start_date, end_date)
@@ -1119,6 +1130,12 @@ class POSMainWindow(QMainWindow):
         self.font_size_combo = QComboBox()
         self.font_size_combo.addItems(["Small", "Medium", "Large"])
         ui_layout.addRow("Font Size:", self.font_size_combo)
+
+        self.show_total_tax_card_checkbox = QCheckBox("Show Total Tax card in reports")
+        ui_layout.addRow(self.show_total_tax_card_checkbox)
+
+        self.profit_includes_tax_checkbox = QCheckBox("Profit includes tax")
+        ui_layout.addRow(self.profit_includes_tax_checkbox)
 
         layout.addWidget(ui_group)
         
@@ -1689,6 +1706,12 @@ REVENUE BY PAYMENT METHOD
         show_served_by = settings.get('show_served_by', 'False')
         self.show_served_by_checkbox.setChecked(show_served_by == 'True')
 
+        show_total_tax_card = settings.get('show_total_tax_card', 'True')
+        self.show_total_tax_card_checkbox.setChecked(show_total_tax_card == 'True')
+
+        profit_includes_tax = settings.get('profit_includes_tax', 'False')
+        self.profit_includes_tax_checkbox.setChecked(profit_includes_tax == 'True')
+
         font_size = settings.get('font_size', 'Medium')
         index = self.font_size_combo.findText(font_size)
         if index != -1:
@@ -1714,6 +1737,8 @@ REVENUE BY PAYMENT METHOD
         self.db.set_setting('tax_rate', self.tax_rate_input.text())
         self.db.set_setting('receipt_footer', self.receipt_footer_input.toPlainText())
         self.db.set_setting('show_served_by', str(self.show_served_by_checkbox.isChecked()))
+        self.db.set_setting('show_total_tax_card', str(self.show_total_tax_card_checkbox.isChecked()))
+        self.db.set_setting('profit_includes_tax', str(self.profit_includes_tax_checkbox.isChecked()))
         
         font_size_str = self.font_size_combo.currentText()
         self.db.set_setting('font_size', font_size_str)
